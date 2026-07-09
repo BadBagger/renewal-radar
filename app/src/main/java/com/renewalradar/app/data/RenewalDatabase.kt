@@ -57,23 +57,7 @@ abstract class RenewalDatabase : RoomDatabase() {
                         sourceAccountId TEXT NOT NULL,
                         confidence REAL NOT NULL,
                         status TEXT NOT NULL,
-                        createdAtMillis INTEGER NOT NULL,
-                        averageAmountCents INTEGER NOT NULL DEFAULT 0,
-                        lastChargeDate INTEGER NOT NULL DEFAULT 0,
-                        transactionsUsed INTEGER NOT NULL DEFAULT 0,
-                        accountNickname TEXT NOT NULL DEFAULT '',
-                        category TEXT NOT NULL DEFAULT '',
-                        reasonDetected TEXT NOT NULL DEFAULT '',
-                        candidateType TEXT NOT NULL DEFAULT 'subscription',
-                        matchingTransactions TEXT NOT NULL DEFAULT '',
-                        reminderDays INTEGER NOT NULL DEFAULT 14,
-                        notes TEXT NOT NULL DEFAULT '',
-                        amountVarianceCents INTEGER NOT NULL DEFAULT 0,
-                        nextChargeWindowStart INTEGER NOT NULL DEFAULT 0,
-                        nextChargeWindowEnd INTEGER NOT NULL DEFAULT 0,
-                        userEditedNextDate INTEGER NOT NULL DEFAULT 0,
-                        inactive INTEGER NOT NULL DEFAULT 0,
-                        watchOuts TEXT NOT NULL DEFAULT ''
+                        createdAtMillis INTEGER NOT NULL
                     )
                     """.trimIndent()
                 )
