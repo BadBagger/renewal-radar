@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,16 +15,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,19 +60,36 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.renewalradar.app.data.BankConnectionRepository
+import com.renewalradar.app.data.BankConnectionStatus
+import com.renewalradar.app.data.CandidateStatus
+import com.renewalradar.app.data.ConnectedAccount
+import com.renewalradar.app.data.RenewalCandidate
 import com.renewalradar.app.data.RenewalItem
 import com.renewalradar.app.data.RenewalSettings
 import com.renewalradar.app.data.RenewalStatus
+import com.renewalradar.app.data.formatCents
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun RenewalRadarRoot(
     state: RenewalUiState,
     onSave: (RenewalItem, () -> Unit) -> Unit,
     onDelete: (RenewalItem, () -> Unit) -> Unit,
-    onSettingsChange: (RenewalSettings) -> Unit
+    onSettingsChange: (RenewalSettings) -> Unit,
+    onConnectAccount: () -> Unit,
+    onSyncBankAccounts: () -> Unit,
+    onDisconnectAccount: (ConnectedAccount) -> Unit,
+    onUpdateCandidate: (RenewalCandidate) -> Unit,
+    onConfirmCandidate: (RenewalCandidate) -> Unit,
+    onConfirmCandidates: (List<RenewalCandidate>) -> Unit,
+    onIgnoreCandidate: (RenewalCandidate) -> Unit,
+    onIgnoreCandidates: (List<RenewalCandidate>) -> Unit,
+    onDismissCandidate: (RenewalCandidate) -> Unit,
+    onDeleteCandidate: (RenewalCandidate) -> Unit
 ) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
@@ -86,6 +109,18 @@ fun RenewalRadarRoot(
                     onClick = { navController.navigate("items") { launchSingleTop = true } },
                     icon = { Icon(Icons.Default.List, contentDescription = "Renewals") },
                     label = { Text("Renewals") }
+                )
+                NavigationBarItem(
+                    selected = route == "accounts",
+                    onClick = { navController.navigate("accounts") { launchSingleTop = true } },
+                    icon = { Icon(Icons.Default.CreditCard, contentDescription = "Accounts") },
+                    label = { Text("Accounts") }
+                )
+                NavigationBarItem(
+                    selected = route == "candidates",
+                    onClick = { navController.navigate("candidates") { launchSingleTop = true } },
+                    icon = { Icon(Icons.Default.Search, contentDescription = "Detected") },
+                    label = { Text("Detected") }
                 )
                 NavigationBarItem(
                     selected = route == "settings",
@@ -117,6 +152,27 @@ fun RenewalRadarRoot(
                     onEdit = { navController.navigate("edit/${it.id}") }
                 )
             }
+            composable("accounts") {
+                ConnectedAccountsScreen(
+                    state = state,
+                    onConnectAccount = onConnectAccount,
+                    onSyncBankAccounts = onSyncBankAccounts,
+                    onDisconnectAccount = onDisconnectAccount,
+                    onOpenCandidates = { navController.navigate("candidates") }
+                )
+            }
+            composable("candidates") {
+                CandidateReviewScreen(
+                    candidates = state.renewalCandidates,
+                    onUpdateCandidate = onUpdateCandidate,
+                    onConfirmCandidate = onConfirmCandidate,
+                    onConfirmCandidates = onConfirmCandidates,
+                    onIgnoreCandidate = onIgnoreCandidate,
+                    onIgnoreCandidates = onIgnoreCandidates,
+                    onDismissCandidate = onDismissCandidate,
+                    onDeleteCandidate = onDeleteCandidate
+                )
+            }
             composable(
                 route = "edit/{id}",
                 arguments = listOf(navArgument("id") { type = NavType.LongType })
@@ -132,7 +188,11 @@ fun RenewalRadarRoot(
                 )
             }
             composable("settings") {
-                SettingsScreen(settings = state.settings, onSettingsChange = onSettingsChange)
+                SettingsScreen(
+                    settings = state.settings,
+                    onSettingsChange = onSettingsChange,
+                    onOpenConnectedAccounts = { navController.navigate("accounts") }
+                )
             }
         }
     }
@@ -216,6 +276,503 @@ private fun RenewalListScreen(items: List<RenewalItem>, onEdit: (RenewalItem) ->
                 RenewalCard(item = item, onClick = { onEdit(item) })
             }
         }
+    }
+}
+
+@Composable
+private fun ConnectedAccountsScreen(
+    state: RenewalUiState,
+    onConnectAccount: () -> Unit,
+    onSyncBankAccounts: () -> Unit,
+    onDisconnectAccount: (ConnectedAccount) -> Unit,
+    onOpenCandidates: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Connected Accounts", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "Connect banks and cards through Plaid Link to detect recurring charges before they surprise you.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        item {
+            AccountStateCard(state.connectionState)
+        }
+        item {
+            PrivacyCard()
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onConnectAccount,
+                    enabled = state.connectionState != BankConnectionStatus.Connecting &&
+                        state.connectionState != BankConnectionStatus.Syncing,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Connect bank or card")
+                }
+                Button(
+                    onClick = onSyncBankAccounts,
+                    enabled = !state.bankSyncInProgress &&
+                        state.connectedAccounts.any { it.status == BankConnectionStatus.Connected },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (state.bankSyncInProgress) "Syncing" else "Sync now")
+                }
+            }
+        }
+        state.bankMessage?.let { message ->
+            item {
+                Text(message, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        item {
+            TextButton(onClick = onOpenCandidates, modifier = Modifier.fillMaxWidth()) {
+                Text("Review detected renewals (${state.renewalCandidates.count { it.status == CandidateStatus.Pending }})")
+            }
+        }
+        if (state.connectedAccounts.isEmpty()) {
+            item {
+                EmptyState("Not connected. Add a bank or card to start detecting recurring charges.")
+            }
+        } else {
+            items(
+                state.connectedAccounts.filterNot { it.accountId == BankConnectionRepository.CONNECTING_PLACEHOLDER_ID },
+                key = { it.accountId }
+            ) { account ->
+                ConnectedAccountCard(account = account, onDisconnect = { onDisconnectAccount(account) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccountStateCard(status: BankConnectionStatus) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Sync status", style = MaterialTheme.typography.titleMedium)
+            Text(status.displayLabel(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PrivacyCard() {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Privacy and security", style = MaterialTheme.typography.titleMedium)
+            Text("Renewal Radar uses read-only transaction data to detect recurring charges. We never see or store your bank login.")
+            Text("Plaid Link handles bank login. Android sends only the public_token to a secure HTTPS backend.")
+            Text("Plaid access tokens stay encrypted on the backend. The app receives only safe account, transaction, and subscription summaries.")
+        }
+    }
+}
+
+@Composable
+private fun ConnectedAccountCard(account: ConnectedAccount, onDisconnect: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(account.institutionName, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${account.accountName} ${account.accountMask.maskForDisplay()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "Account type: ${account.accountType}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "Last synced: ${account.lastSyncedAtMillis.formatTimestamp()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                AssistChip(
+                    onClick = {},
+                    label = { Text(account.status.displayLabel()) }
+                )
+            }
+            if (account.status == BankConnectionStatus.Connected) {
+                TextButton(onClick = onDisconnect) {
+                    Text("Disconnect")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CandidateReviewScreen(
+    candidates: List<RenewalCandidate>,
+    onUpdateCandidate: (RenewalCandidate) -> Unit,
+    onConfirmCandidate: (RenewalCandidate) -> Unit,
+    onConfirmCandidates: (List<RenewalCandidate>) -> Unit,
+    onIgnoreCandidate: (RenewalCandidate) -> Unit,
+    onIgnoreCandidates: (List<RenewalCandidate>) -> Unit,
+    onDismissCandidate: (RenewalCandidate) -> Unit,
+    onDeleteCandidate: (RenewalCandidate) -> Unit
+) {
+    var selectedIds by remember(candidates) { mutableStateOf(emptySet<String>()) }
+    val highConfidence = candidates.filter { it.status == CandidateStatus.Pending && it.confidence >= 0.80f }
+    val needsReview = candidates.filter { it.status == CandidateStatus.Pending && it.confidence < 0.80f }
+    val ignored = candidates.filter { it.status == CandidateStatus.Ignored || it.status == CandidateStatus.Dismissed }
+    val selectedCandidates = candidates.filter { it.candidateId in selectedIds && it.status == CandidateStatus.Pending }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Detected renewals", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "Review each candidate before it becomes a renewal. Nothing is added automatically.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onConfirmCandidates(highConfidence) },
+                    enabled = highConfidence.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Track all high-confidence")
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        onIgnoreCandidates(selectedCandidates)
+                        selectedIds = emptySet()
+                    },
+                    enabled = selectedCandidates.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Ignore selected")
+                }
+                TextButton(
+                    onClick = {
+                        selectedCandidates.forEach(onDismissCandidate)
+                        selectedIds = emptySet()
+                    },
+                    enabled = selectedCandidates.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Review later")
+                }
+            }
+        }
+        if (highConfidence.isEmpty() && needsReview.isEmpty() && ignored.isEmpty()) {
+            item {
+                EmptyState("No recurring charges detected yet. Try syncing again after more transactions are available.")
+            }
+        } else {
+            candidateSection(
+                title = "High confidence",
+                candidates = highConfidence,
+                selectedIds = selectedIds,
+                onSelectedChange = { candidate, selected ->
+                    selectedIds = if (selected) selectedIds + candidate.candidateId else selectedIds - candidate.candidateId
+                },
+                onUpdateCandidate = onUpdateCandidate,
+                onConfirmCandidate = onConfirmCandidate,
+                onIgnoreCandidate = onIgnoreCandidate,
+                onDeleteCandidate = onDeleteCandidate
+            )
+            candidateSection(
+                title = "Needs review",
+                candidates = needsReview,
+                selectedIds = selectedIds,
+                onSelectedChange = { candidate, selected ->
+                    selectedIds = if (selected) selectedIds + candidate.candidateId else selectedIds - candidate.candidateId
+                },
+                onUpdateCandidate = onUpdateCandidate,
+                onConfirmCandidate = onConfirmCandidate,
+                onIgnoreCandidate = onIgnoreCandidate,
+                onDeleteCandidate = onDeleteCandidate
+            )
+            candidateSection(
+                title = "Ignored/dismissed",
+                candidates = ignored,
+                selectedIds = emptySet(),
+                onSelectedChange = { _, _ -> },
+                onUpdateCandidate = onUpdateCandidate,
+                onConfirmCandidate = onConfirmCandidate,
+                onIgnoreCandidate = onIgnoreCandidate,
+                onDeleteCandidate = onDeleteCandidate,
+                selectable = false
+            )
+        }
+    }
+}
+
+private fun androidx.compose.foundation.lazy.LazyListScope.candidateSection(
+    title: String,
+    candidates: List<RenewalCandidate>,
+    selectedIds: Set<String>,
+    onSelectedChange: (RenewalCandidate, Boolean) -> Unit,
+    onUpdateCandidate: (RenewalCandidate) -> Unit,
+    onConfirmCandidate: (RenewalCandidate) -> Unit,
+    onIgnoreCandidate: (RenewalCandidate) -> Unit,
+    onDeleteCandidate: (RenewalCandidate) -> Unit,
+    selectable: Boolean = true
+) {
+    item {
+        Text(title, style = MaterialTheme.typography.titleLarge)
+    }
+    if (candidates.isEmpty()) {
+        item {
+            EmptyState("No candidates in this section.")
+        }
+    } else {
+        items(candidates, key = { it.candidateId }) { candidate ->
+            CandidateCard(
+                candidate = candidate,
+                selected = candidate.candidateId in selectedIds,
+                selectable = selectable,
+                onSelectedChange = { onSelectedChange(candidate, it) },
+                onUpdateCandidate = onUpdateCandidate,
+                onConfirm = { onConfirmCandidate(candidate) },
+                onIgnore = { onIgnoreCandidate(candidate) },
+                onDelete = { onDeleteCandidate(candidate) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CandidateCard(
+    candidate: RenewalCandidate,
+    selected: Boolean,
+    selectable: Boolean,
+    onSelectedChange: (Boolean) -> Unit,
+    onUpdateCandidate: (RenewalCandidate) -> Unit,
+    onConfirm: () -> Unit,
+    onIgnore: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var editing by remember(candidate.candidateId) { mutableStateOf(false) }
+
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                if (selectable) {
+                    Checkbox(checked = selected, onCheckedChange = onSelectedChange)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(candidate.merchantName, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Expected around ${candidate.nextChargeDate.prettyDate()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "Usually ${formatCents(candidate.averageAmountCents)}" +
+                            candidate.amountVarianceCents.takeIf { it > 0 }?.let { " +/- ${formatCents(it)}" }.orEmpty(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "Last charged ${candidate.lastChargeDate.prettyDate()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "${candidate.cadence} - ${candidate.confidenceLabel()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text("Detected from ${candidate.safeAccountLabel()}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (candidate.nextChargeWindowStart != candidate.nextChargeWindowEnd) {
+                        Text(
+                            "Window ${candidate.nextChargeWindowStart.prettyDate()} to ${candidate.nextChargeWindowEnd.prettyDate()}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (candidate.reasonDetected.isNotBlank()) {
+                        Text(
+                            "Why detected: ${candidate.reasonDetected}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    WatchOuts(candidate)
+                    LastTransactions(candidate)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onConfirm, enabled = candidate.status == CandidateStatus.Pending) { Text("Track this") }
+                TextButton(onClick = { editing = true }) { Text("Edit") }
+                TextButton(onClick = onIgnore, enabled = candidate.status == CandidateStatus.Pending) { Text("Ignore") }
+            }
+        }
+    }
+
+    if (editing) {
+        CandidateEditDialog(
+            candidate = candidate,
+            onDismiss = { editing = false },
+            onSave = {
+                onUpdateCandidate(it)
+                editing = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun WatchOuts(candidate: RenewalCandidate) {
+    val watchOuts = candidate.watchOuts.lines().map { it.trim() }.filter { it.isNotBlank() }
+    if (watchOuts.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Watch-outs", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+        watchOuts.forEach { item ->
+            Text(item, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun LastTransactions(candidate: RenewalCandidate) {
+    val lines = candidate.matchingTransactions.lines().map { it.trim() }.filter { it.isNotBlank() }.takeLast(3)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Last matching transactions", style = MaterialTheme.typography.labelLarge)
+        if (lines.isEmpty()) {
+            Text(
+                "Matched ${candidate.transactionsUsed.coerceAtLeast(2)} recent charges.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
+        } else {
+            lines.forEach { line ->
+                Text(line, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CandidateEditDialog(
+    candidate: RenewalCandidate,
+    onDismiss: () -> Unit,
+    onSave: (RenewalCandidate) -> Unit
+) {
+    var merchant by remember(candidate.candidateId) { mutableStateOf(candidate.merchantName) }
+    var amount by remember(candidate.candidateId) { mutableStateOf(candidate.amountCents.toString()) }
+    var cadence by remember(candidate.candidateId) { mutableStateOf(candidate.cadence) }
+    var nextDate by remember(candidate.candidateId) { mutableStateOf(candidate.nextChargeDate) }
+    var category by remember(candidate.candidateId) { mutableStateOf(candidate.category) }
+    var account by remember(candidate.candidateId) { mutableStateOf(candidate.safeAccountLabel()) }
+    var reminderDays by remember(candidate.candidateId) { mutableStateOf(candidate.reminderDays.toString()) }
+    var isBill by remember(candidate.candidateId) { mutableStateOf(candidate.candidateType == "bill") }
+    var notes by remember(candidate.candidateId) { mutableStateOf(candidate.notes) }
+    var showDatePicker by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit detected renewal") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 520.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item { OutlinedTextField(merchant, { merchant = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth()) }
+                item { NumberField("Amount in cents", amount, { amount = it }, Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(cadence, { cadence = it }, label = { Text("Billing cycle") }, modifier = Modifier.fillMaxWidth()) }
+                item { DateField(nextDate, label = "Next charge date", onOpenPicker = { showDatePicker = true }) }
+                item { OutlinedTextField(category, { category = it }, label = { Text("Category") }, modifier = Modifier.fillMaxWidth()) }
+                item {
+                    OutlinedTextField(
+                        account,
+                        { account = it },
+                        label = { Text("Payment account/card") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Reminder timing", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(0 to "Same-day", 1 to "1 day", 3 to "3 days", 7 to "7 days").forEach { (days, label) ->
+                                TextButton(onClick = { reminderDays = days.toString() }) {
+                                    Text(label)
+                                }
+                            }
+                        }
+                        NumberField("Custom days before", reminderDays, { reminderDays = it }, Modifier.fillMaxWidth())
+                    }
+                }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(if (isBill) "Bill" else "Subscription")
+                        Switch(checked = isBill, onCheckedChange = { isBill = it })
+                    }
+                }
+                item {
+                    OutlinedTextField(
+                        notes,
+                        { notes = it },
+                        label = { Text("Notes") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val cents = amount.toIntOrNull() ?: candidate.amountCents
+                    onSave(
+                        candidate.copy(
+                            merchantName = merchant.trim().ifBlank { candidate.merchantName },
+                            amountCents = cents,
+                            averageAmountCents = cents,
+                            cadence = cadence.trim().ifBlank { candidate.cadence },
+                            nextChargeDate = nextDate,
+                            nextChargeWindowStart = nextDate,
+                            nextChargeWindowEnd = nextDate,
+                            userEditedNextDate = candidate.userEditedNextDate || nextDate != candidate.nextChargeDate,
+                            category = category.trim(),
+                            accountNickname = account.trim().ifBlank { candidate.safeAccountLabel() },
+                            reminderDays = reminderDays.toIntOrNull() ?: candidate.reminderDays,
+                            candidateType = if (isBill) "bill" else "subscription",
+                            notes = notes.trim()
+                        )
+                    )
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+
+    if (showDatePicker) {
+        RenewalDatePickerDialog(
+            selectedDate = nextDate,
+            onDismiss = { showDatePicker = false },
+            onDateSelected = {
+                nextDate = it
+                showDatePicker = false
+            }
+        )
     }
 }
 
@@ -329,12 +886,12 @@ private fun RenewalEditScreen(
 }
 
 @Composable
-private fun DateField(dueDate: LocalDate, onOpenPicker: () -> Unit) {
+private fun DateField(dueDate: LocalDate, label: String = "Final deadline", onOpenPicker: () -> Unit) {
     OutlinedTextField(
         value = dueDate.toString(),
         onValueChange = {},
         readOnly = true,
-        label = { Text("Final deadline") },
+        label = { Text(label) },
         trailingIcon = {
             IconButton(onClick = onOpenPicker) {
                 Icon(Icons.Default.Edit, contentDescription = "Choose deadline")
@@ -393,7 +950,11 @@ private fun NumberField(label: String, value: String, onValueChange: (String) ->
 }
 
 @Composable
-private fun SettingsScreen(settings: RenewalSettings, onSettingsChange: (RenewalSettings) -> Unit) {
+private fun SettingsScreen(
+    settings: RenewalSettings,
+    onSettingsChange: (RenewalSettings) -> Unit,
+    onOpenConnectedAccounts: () -> Unit
+) {
     var renewWindow by remember(settings.defaultRenewWindowDays) { mutableStateOf(settings.defaultRenewWindowDays.toString()) }
     var attentionWindow by remember(settings.defaultAttentionWindowDays) { mutableStateOf(settings.defaultAttentionWindowDays.toString()) }
 
@@ -406,6 +967,12 @@ private fun SettingsScreen(settings: RenewalSettings, onSettingsChange: (Renewal
         item {
             Text("Settings", style = MaterialTheme.typography.headlineMedium)
             Text("Default example: renew at 70 days, pay attention at 14 days.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            TextButton(onClick = onOpenConnectedAccounts, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.CreditCard, contentDescription = null)
+                Text("Connected Accounts")
+            }
         }
         item {
             NumberField("Default renew window", renewWindow, {
@@ -536,6 +1103,39 @@ private fun updateSettingsFromText(
         )
     )
 }
+
+private fun String.maskForDisplay(): String = if (isBlank()) "****" else "****$this"
+
+private fun Long?.formatTimestamp(): String {
+    if (this == null) return "Never"
+    val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a")
+    return Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault()).format(formatter)
+}
+
+private fun BankConnectionStatus.displayLabel(): String = when (this) {
+    BankConnectionStatus.NotConnected -> "Not connected"
+    BankConnectionStatus.Connecting -> "Connecting"
+    BankConnectionStatus.Connected -> "Connected"
+    BankConnectionStatus.Syncing -> "Syncing"
+    BankConnectionStatus.SyncFailed -> "Sync failed"
+    BankConnectionStatus.Disconnected -> "Disconnected"
+    BankConnectionStatus.PermissionRevoked -> "Permission revoked"
+}
+
+private fun RenewalCandidate.confidenceLabel(): String = when {
+    confidence >= 0.80f -> "High confidence"
+    confidence >= 0.55f -> "Medium confidence"
+    else -> "Low confidence"
+}
+
+private fun RenewalCandidate.safeAccountLabel(): String =
+    accountNickname
+        .trim()
+        .takeIf { it.isNotBlank() }
+        ?: "Connected account"
+
+private fun LocalDate.prettyDate(): String =
+    format(DateTimeFormatter.ofPattern("MMM d"))
 
 private fun statusColor(status: RenewalStatus): Color = when (status) {
     RenewalStatus.Safe -> Color(0xFF15803D)

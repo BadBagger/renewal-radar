@@ -3,6 +3,7 @@
 .kotlin/
 build/
 local.properties
+keystore.properties
 *.iml
 app/build/
 captures/
@@ -10,3 +11,5 @@ captures/
 *.aab
 *.jks
 *.keystore
+backend/.env
+backend/data/*.json
