@@ -124,6 +124,14 @@ const server = http.createServer(async (req, res) => {
       return handlePaycheckDecision(req, res, userId, "ignored");
     }
 
+    if (req.method === "POST" && url.pathname === "/api/paycheck/paychecks/received") {
+      return handlePaycheckReceived(req, res, userId);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/paycheck/paychecks/manual") {
+      return handleManualPaycheck(req, res, userId);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/paycheck/bills-before-payday") {
       return handleBillsBeforePayday(res, userId, url);
     }
@@ -136,8 +144,16 @@ const server = http.createServer(async (req, res) => {
       return handleUpsertPayPeriod(req, res, userId);
     }
 
+    if (req.method === "GET" && url.pathname === "/api/paycheck/pay-periods/setup") {
+      return handlePayPeriodSetup(res, userId, url);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/paycheck/pay-periods/current") {
       return handleCurrentPayPeriod(res, userId, url);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/pay-calendar") {
+      return handlePaycheckCalendar(res, userId, url);
     }
 
     if (req.method === "GET" && url.pathname === "/api/paycheck/watch-outs") {
@@ -442,6 +458,61 @@ async function handlePaycheckDecision(req, res, userId, decision) {
   return sendJson(res, 200, { status: decision, paycheck: candidate });
 }
 
+async function handlePaycheckReceived(req, res, userId) {
+  const body = await readJson(req).catch(() => ({}));
+  const amountCents = centsFromBody(body, ["actualAmountCents", "amountCents", "amount"], null);
+  const payDate = body.payDate || body.date || todayIso();
+  if (!amountCents) return sendJson(res, 400, { error: "amount_required" });
+  const candidate = body.candidateId ? store.paycheckCandidates[body.candidateId] : null;
+  const id = body.id || `confirmed-pay-${crypto.randomUUID()}`;
+  store.confirmedPaychecks[id] = {
+    id,
+    userId,
+    paycheckCandidateId: candidate?.id || null,
+    incomeStreamId: body.incomeStreamId || candidate?.incomeStreamId || null,
+    payerName: body.payerName || body.sourceName || candidate?.payerName || "Manual paycheck",
+    amountCents: Number(amountCents),
+    expectedAmountCents: Number(body.expectedAmountCents || candidate?.expectedAmountCents || amountCents),
+    payDate,
+    actualTransactionId: body.actualTransactionId || null,
+    notes: body.notes || "Marked received",
+    status: "received",
+    confirmedAt: nowIso()
+  };
+  if (candidate && candidate.userId === userId) {
+    candidate.status = "confirmed";
+    candidate.updatedAt = nowIso();
+  }
+  audit(userId, "paycheck.received", { paycheckId: id });
+  saveStore(store);
+  return sendJson(res, 200, { paycheck: store.confirmedPaychecks[id] });
+}
+
+async function handleManualPaycheck(req, res, userId) {
+  const body = await readJson(req).catch(() => ({}));
+  const amountCents = centsFromBody(body, ["amountCents", "actualAmountCents", "expectedAmountCents", "amount"], null);
+  const payDate = body.payDate || body.date || todayIso();
+  if (!amountCents) return sendJson(res, 400, { error: "amount_required" });
+  const id = body.id || `manual-pay-${crypto.randomUUID()}`;
+  store.confirmedPaychecks[id] = {
+    id,
+    userId,
+    paycheckCandidateId: null,
+    incomeStreamId: body.incomeStreamId || null,
+    payerName: body.payerName || body.sourceName || "Manual paycheck",
+    amountCents: Number(amountCents),
+    expectedAmountCents: Number(body.expectedAmountCents || amountCents),
+    payDate,
+    actualTransactionId: null,
+    notes: body.notes || "Added manually",
+    status: "manual",
+    confirmedAt: nowIso()
+  };
+  audit(userId, "paycheck.manual", { paycheckId: id });
+  saveStore(store);
+  return sendJson(res, 200, { paycheck: store.confirmedPaychecks[id] });
+}
+
 function handleBillsBeforePayday(res, userId, url) {
   detectPaycheckPilotData(userId);
   const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
@@ -473,11 +544,24 @@ function handleSafeToSpend(res, userId, url) {
 async function handleUpsertPayPeriod(req, res, userId) {
   const body = await readJson(req);
   const id = body.id || `period-${crypto.randomUUID()}`;
+  const payFrequency = normalizePayFrequency(body.payFrequency || body.frequency || body.cadence || "manual");
+  const nextPayday = body.nextPayday;
+  const startDate = body.startDate || body.payPeriodStartDate || body.periodStartDate || derivePayPeriodStart(nextPayday, payFrequency);
   const payPeriod = {
     id,
     userId,
-    startDate: body.startDate || todayIso(),
-    nextPayday: body.nextPayday,
+    payFrequency,
+    frequency: payFrequency,
+    employerName: body.employerName || body.sourceName || body.payerName || "",
+    sourceName: body.sourceName || body.employerName || body.payerName || "",
+    paycheckAccountId: body.paycheckAccountId || body.accountId || null,
+    paycheckAccountNickname: body.paycheckAccountNickname || accountNicknameForAccountId(body.paycheckAccountId || body.accountId, store),
+    lastPayday: body.lastPayday || body.lastDepositDate || null,
+    startDate,
+    payPeriodStartDate: startDate,
+    endDate: body.endDate || body.payPeriodEndDate || body.periodEndDate || (nextPayday ? addDays(nextPayday, -1) : null),
+    payPeriodEndDate: body.payPeriodEndDate || body.endDate || body.periodEndDate || (nextPayday ? addDays(nextPayday, -1) : null),
+    nextPayday,
     expectedPaycheckCents: Number(body.expectedPaycheckCents || body.expectedAmountCents || 0),
     safetyBufferCents: centsFromBody(body, ["safetyBufferCents", "bufferAmountCents"], 20000),
     currentBalanceCents: centsFromBody(body, ["currentBalanceCents", "currentBalance"], null),
@@ -497,12 +581,24 @@ async function handleUpsertPayPeriod(req, res, userId) {
   if (!payPeriod.nextPayday) return sendJson(res, 400, { error: "nextPayday_required" });
   store.payPeriods[id] = payPeriod;
   saveStore(store);
-  return sendJson(res, 200, { payPeriod });
+  return sendJson(res, 200, { payPeriod, setup: buildPayPeriodSetup(userId, store) });
+}
+
+function handlePayPeriodSetup(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  return sendJson(res, 200, buildPayPeriodSetup(userId, store, url.searchParams.get("asOf") || todayIso()));
 }
 
 function handleCurrentPayPeriod(res, userId, url) {
   detectPaycheckPilotData(userId);
   return sendJson(res, 200, { payPeriod: currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso()) });
+}
+
+function handlePaycheckCalendar(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  const asOf = url.searchParams.get("asOf") || todayIso();
+  const payPeriod = currentPayPeriod(userId, asOf);
+  return sendJson(res, 200, buildPaycheckCalendar(userId, payPeriod, store, asOf));
 }
 
 function handlePaycheckWatchOuts(res, userId, url) {
@@ -1186,8 +1282,18 @@ function currentPayPeriod(userId, asOf = todayIso(), currentStore = store) {
   const period = {
     id: `period-${stableHash(`${userId}:${lastPayDate}:${nextPayday}`)}`,
     userId,
+    payFrequency: normalizePayFrequency(stream?.cadence || "manual"),
+    frequency: normalizePayFrequency(stream?.cadence || "manual"),
+    employerName: stream?.sourceName || stream?.payerName || "",
+    sourceName: stream?.sourceName || stream?.payerName || "",
+    paycheckAccountId: stream?.accountId || null,
+    paycheckAccountNickname: stream?.accountId ? accountNicknameForAccountId(stream.accountId, currentStore) : "Connected account",
+    lastPayday: lastPayDate,
     startDate: lastPayDate,
+    payPeriodStartDate: lastPayDate,
     nextPayday,
+    endDate: addDays(nextPayday, -1),
+    payPeriodEndDate: addDays(nextPayday, -1),
     expectedPaycheckCents: stream?.averageAmountCents || 0,
     safetyBufferCents: 20000,
     currentBalanceCents: estimateCurrentBalanceCents(userId, currentStore),
@@ -1206,6 +1312,120 @@ function currentPayPeriod(userId, asOf = todayIso(), currentStore = store) {
   };
   currentStore.payPeriods[period.id] = period;
   return period;
+}
+
+function buildPayPeriodSetup(userId, currentStore = store, asOf = todayIso()) {
+  const current = currentPayPeriod(userId, asOf, currentStore);
+  const suggestions = payScheduleSuggestions(userId, currentStore);
+  return {
+    options: ["weekly", "biweekly", "semi-monthly", "monthly", "irregular/gig", "manual"],
+    currentPayPeriod: current,
+    suggestedSchedule: suggestions[0] || null,
+    suggestions,
+    fields: [
+      "payFrequency",
+      "lastPayday",
+      "nextPayday",
+      "expectedAmount",
+      "employerName",
+      "paycheckAccountId",
+      "payPeriodStartDate",
+      "payPeriodEndDate",
+      "bufferAmount",
+      "essentialsAllowance",
+      "savingsGoal"
+    ],
+    evidence: suggestions.map((item) => item.evidence),
+    missingData: missingPayPeriodSetupData(current)
+  };
+}
+
+function payScheduleSuggestions(userId, currentStore = store) {
+  return Object.values(currentStore.incomeStreams)
+    .filter((stream) => stream.userId === userId)
+    .sort((a, b) => b.confidenceScore - a.confidenceScore)
+    .map((stream) => {
+      const frequency = normalizePayFrequency(stream.cadence);
+      const nextPayday = stream.predictedNextPayday || stream.predictedNextPayDate;
+      return {
+        id: `suggestion-${stream.id}`,
+        incomeStreamId: stream.id,
+        payFrequency: frequency,
+        lastPayday: stream.lastDepositDate || stream.lastPayDate,
+        nextPayday,
+        expectedAmountCents: stream.averageAmountCents,
+        expectedAmount: stream.averageAmountCents,
+        employerName: stream.sourceName || stream.payerName,
+        sourceName: stream.sourceName || stream.payerName,
+        paycheckAccountId: stream.accountId,
+        paycheckAccountNickname: accountNicknameForAccountId(stream.accountId, currentStore),
+        payPeriodStartDate: stream.lastDepositDate || stream.lastPayDate,
+        payPeriodEndDate: nextPayday ? addDays(nextPayday, -1) : null,
+        bufferAmountCents: 20000,
+        essentialsAllowanceCents: 0,
+        savingsGoalCents: 0,
+        confidenceScore: stream.confidenceScore,
+        evidence: incomeEvidenceText(stream),
+        transactionsUsed: stream.transactionsUsed || stream.transactionIds || [],
+        status: "suggested"
+      };
+    });
+}
+
+function buildPaycheckCalendar(userId, payPeriod, currentStore = store, asOf = todayIso()) {
+  const events = paycheckCalendarEvents(userId, payPeriod, currentStore, asOf);
+  return {
+    payPeriod,
+    previousPaydays: events.filter((item) => item.date < asOf).sort((a, b) => b.date.localeCompare(a.date)),
+    upcomingPaydays: events.filter((item) => item.date >= asOf).sort((a, b) => a.date.localeCompare(b.date)),
+    events,
+    watchOuts: paycheckCalendarWatchOuts(userId, payPeriod, events, currentStore, asOf)
+  };
+}
+
+function paycheckCalendarEvents(userId, payPeriod, currentStore = store, asOf = todayIso()) {
+  const frequency = normalizePayFrequency(payPeriod.payFrequency || payPeriod.frequency || "manual");
+  const previousStart = addDays(asOf, -90);
+  const upcomingEnd = addDays(asOf, 120);
+  const confirmedByDate = groupBy(Object.values(currentStore.confirmedPaychecks)
+    .filter((item) => item.userId === userId), (item) => item.payDate);
+  const dates = new Set();
+  for (const item of Object.values(currentStore.confirmedPaychecks).filter((pay) => pay.userId === userId)) dates.add(item.payDate);
+  for (const date of generatedPaydays(payPeriod.nextPayday, frequency, previousStart, upcomingEnd)) dates.add(date);
+  return [...dates].sort().map((date) => {
+    const actuals = confirmedByDate.get(date) || [];
+    const actualAmountCents = actuals.length ? actuals.reduce((sum, item) => sum + Number(item.amountCents || 0), 0) : null;
+    const expectedAmountCents = Number(payPeriod.expectedPaycheckCents || 0);
+    return {
+      id: `payday-${stableHash(`${userId}:${date}`)}`,
+      userId,
+      date,
+      expectedAmountCents,
+      actualAmountCents,
+      sourceName: payPeriod.sourceName || payPeriod.employerName || actuals[0]?.payerName || "Paycheck",
+      accountNickname: payPeriod.paycheckAccountNickname || "Connected account",
+      status: actualAmountCents === null ? "expected" : "received",
+      varianceCents: actualAmountCents === null ? null : actualAmountCents - expectedAmountCents,
+      note: paycheckCalendarNote(expectedAmountCents, actualAmountCents, date, asOf),
+      actions: ["confirmPaycheck", "editExpectedAmount", "markReceived", "markNotIncome", "addManualPaycheck"]
+    };
+  });
+}
+
+function paycheckCalendarWatchOuts(userId, payPeriod, events, currentStore = store, asOf = todayIso()) {
+  const watchOuts = [];
+  for (const event of events) {
+    if (event.date < asOf && event.status === "expected") {
+      watchOuts.push(watchOut(`missing-${event.date}`, userId, payPeriod.id, "Paycheck not marked received", `${event.date} is still expected. Mark it received or update the schedule.`, "medium"));
+    }
+    if (event.actualAmountCents !== null && event.expectedAmountCents && event.actualAmountCents < Math.round(event.expectedAmountCents * 0.85)) {
+      watchOuts.push(watchOut(`lower-${event.date}`, userId, payPeriod.id, "Paycheck was lower than usual", `${event.date} was below the expected amount.`, "medium"));
+    }
+    if (event.actualAmountCents !== null && event.expectedAmountCents && event.actualAmountCents > Math.round(event.expectedAmountCents * 1.15)) {
+      watchOuts.push(watchOut(`higher-${event.date}`, userId, payPeriod.id, "Paycheck was higher than usual", `${event.date} was above the expected amount.`, "low"));
+    }
+  }
+  return uniqueWatchOuts(watchOuts);
 }
 
 function billsBeforePayday(userId, payPeriod, currentStore = store) {
@@ -2010,6 +2230,83 @@ function normalizeStringList(value) {
   return String(value).split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function normalizePayFrequency(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["weekly", "biweekly", "semi-monthly", "monthly", "manual"].includes(text)) return text;
+  if (text === "semi monthly" || text === "twice monthly" || text === "twicemonthly") return "semi-monthly";
+  if (text === "irregular" || text === "gig" || text === "irregular/gig" || text === "irregular but repeated") return "irregular/gig";
+  if (text === "every 4 weeks") return "biweekly";
+  if (text === "recurring") return "manual";
+  return "manual";
+}
+
+function derivePayPeriodStart(nextPayday, frequency) {
+  if (!nextPayday) return todayIso();
+  if (frequency === "weekly") return addDays(nextPayday, -7);
+  if (frequency === "biweekly") return addDays(nextPayday, -14);
+  if (frequency === "semi-monthly") return addDays(nextPayday, -15);
+  if (frequency === "monthly") return addDays(nextPayday, -30);
+  return addDays(nextPayday, -14);
+}
+
+function incomeEvidenceText(stream) {
+  const count = (stream.transactionsUsed || stream.transactionIds || []).length;
+  const source = stream.sourceName || stream.payerName || "this source";
+  const cadence = normalizePayFrequency(stream.cadence);
+  const weekday = stream.lastDepositDate ? weekdayName(stream.lastDepositDate) : "a regular day";
+  if (cadence === "irregular/gig") return `Detected ${count} variable deposits from ${source}.`;
+  return `Detected ${count} deposits from ${source} every ${cadence === "weekly" ? weekday : cadence}.`;
+}
+
+function missingPayPeriodSetupData(payPeriod) {
+  const missing = [];
+  if (!payPeriod.payFrequency || payPeriod.payFrequency === "manual") missing.push({ field: "payFrequency", message: "Choose how often you get paid." });
+  if (!payPeriod.lastPayday) missing.push({ field: "lastPayday", message: "Add the most recent payday." });
+  if (!payPeriod.nextPayday) missing.push({ field: "nextPayday", message: "Add the next payday." });
+  if (!Number(payPeriod.expectedPaycheckCents)) missing.push({ field: "expectedAmount", message: "Add an expected paycheck amount." });
+  if (!payPeriod.sourceName && !payPeriod.employerName) missing.push({ field: "employerName", message: "Add an employer or income source name." });
+  return missing;
+}
+
+function generatedPaydays(anchorDate, frequency, startDate, endDate) {
+  if (!anchorDate || frequency === "manual" || frequency === "irregular/gig") return [];
+  if (frequency === "semi-monthly") return generatedSemiMonthlyPaydays(anchorDate, startDate, endDate);
+  const step = frequency === "weekly" ? 7 : frequency === "biweekly" ? 14 : 30;
+  let date = anchorDate;
+  while (date > startDate) date = addDays(date, -step);
+  const dates = [];
+  while (date <= endDate) {
+    if (date >= startDate) dates.push(date);
+    date = addDays(date, step);
+  }
+  return dates;
+}
+
+function generatedSemiMonthlyPaydays(anchorDate, startDate, endDate) {
+  const anchorDay = Number(anchorDate.slice(8, 10));
+  const firstDay = anchorDay <= 15 ? anchorDay : 15;
+  const secondDay = anchorDay <= 15 ? Math.min(anchorDay + 15, 28) : anchorDay;
+  const dates = [];
+  let cursor = startDate.slice(0, 7) + "-01";
+  while (cursor <= endDate) {
+    const month = cursor.slice(0, 7);
+    for (const day of [firstDay, secondDay]) {
+      const candidate = `${month}-${String(day).padStart(2, "0")}`;
+      if (candidate >= startDate && candidate <= endDate) dates.push(candidate);
+    }
+    cursor = addMonths(cursor, 1);
+  }
+  return [...new Set(dates)].sort();
+}
+
+function paycheckCalendarNote(expectedAmountCents, actualAmountCents, date, asOf) {
+  if (actualAmountCents === null && date < asOf) return "Missing paycheck warning";
+  if (actualAmountCents === null) return "Expected paycheck";
+  if (expectedAmountCents && actualAmountCents < Math.round(expectedAmountCents * 0.85)) return "Lower-than-usual paycheck warning";
+  if (expectedAmountCents && actualAmountCents > Math.round(expectedAmountCents * 1.15)) return "Higher-than-usual paycheck note";
+  return "Paycheck received";
+}
+
 function sendJson(res, status, value) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -2111,6 +2408,16 @@ function addDays(dateText, days) {
   return date.toISOString().slice(0, 10);
 }
 
+function addMonths(dateText, months) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return date.toISOString().slice(0, 10);
+}
+
+function weekdayName(dateText) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(new Date(`${dateText}T00:00:00Z`));
+}
+
 function redact(value) {
   if (typeof value !== "string") return value;
   return value
@@ -2123,6 +2430,8 @@ export {
   addDays,
   billsBeforePayday,
   buildBillsBeforePaydayView,
+  buildPaycheckCalendar,
+  buildPayPeriodSetup,
   buildSafeToSpendSnapshot,
   dayDiff,
   detectCandidates,

@@ -206,6 +206,34 @@ Request body:
 { "candidateId": "paycheck-abc123", "notes": "Transfer, not payroll" }
 ```
 
+### `POST /api/paycheck/paychecks/received`
+
+Marks an expected or detected paycheck as received. This is useful when the
+deposit arrived but the user wants to confirm the actual amount.
+
+```json
+{
+  "candidateId": "paycheck-abc123",
+  "payDate": "2026-07-15",
+  "actualAmountCents": 84250,
+  "notes": "Matched pay stub"
+}
+```
+
+### `POST /api/paycheck/paychecks/manual`
+
+Adds a manual paycheck when income is irregular, paid outside a connected bank,
+or not detected from Plaid transactions.
+
+```json
+{
+  "sourceName": "Weekend gig",
+  "payDate": "2026-07-12",
+  "amountCents": 17500,
+  "notes": "Cash job"
+}
+```
+
 ### `GET /api/paycheck/bills-before-payday`
 
 Returns the sectioned "Bills before payday" review screen. Sources include
@@ -266,9 +294,14 @@ Request body:
 
 ```json
 {
+  "payFrequency": "biweekly",
+  "lastPayday": "2026-07-01",
   "startDate": "2026-07-01",
+  "endDate": "2026-07-14",
   "nextPayday": "2026-07-15",
   "expectedPaycheckCents": 85000,
+  "sourceName": "PUBLIX PAYROLL",
+  "paycheckAccountId": "acct-checking",
   "safetyBufferCents": 20000,
   "currentBalanceCents": 120000,
   "savingsGoalCents": 10000,
@@ -290,10 +323,28 @@ Manual override and exclusion fields let users correct estimates without
 changing bank data. Excluded accounts, detected candidates, and confirmed
 subscriptions are left out of safe-to-spend calculations.
 
+Supported `payFrequency` values are `weekly`, `biweekly`, `semi-monthly`,
+`monthly`, `irregular/gig`, and `manual`.
+
+### `GET /api/paycheck/pay-periods/setup`
+
+Returns setup options, the current pay-period settings, and suggested schedules
+from detected paycheck deposits. Suggested schedules include evidence text such
+as "Detected 3 deposits from PUBLIX PAYROLL every Thursday." Android should let
+the user confirm or edit the suggestion before relying on it.
+
 ### `GET /api/paycheck/pay-periods/current`
 
 Returns the active pay period. If no explicit period exists, the backend derives
 one from the strongest detected recurring income stream.
+
+### `GET /api/paycheck/pay-calendar`
+
+Returns previous and upcoming paydays for the active schedule, expected versus
+actual amounts from confirmed/manual paychecks, and watch-outs for missing,
+lower-than-usual, or higher-than-usual paychecks. Calendar events expose actions
+for confirm paycheck, edit expected amount, mark received, mark as not income,
+and add manual paycheck.
 
 ### `GET /api/paycheck/watch-outs`
 

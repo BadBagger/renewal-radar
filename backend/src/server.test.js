@@ -4,6 +4,8 @@ import {
   addDays,
   billsBeforePayday,
   buildBillsBeforePaydayView,
+  buildPaycheckCalendar,
+  buildPayPeriodSetup,
   buildSafeToSpendSnapshot,
   currentPayPeriod,
   dayDiff,
@@ -380,6 +382,87 @@ test("bills before payday view sections manual confirmed detected and ignored bi
   assert.ok(view.summary.daysUntilPayday >= 0);
   assert.ok(view.watchOuts.some((item) => item.title.includes("Possible duplicate bill")));
   assert.ok(view.watchOuts.some((item) => item.title.includes("may be higher than usual")));
+});
+
+test("pay period setup suggests detected payroll schedule with evidence", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  ["2026-01-01", "2026-01-08", "2026-01-15"].forEach((date, index) => {
+    store.bankTransactions[`publix-${index}`] = tx(`publix-${index}`, "PUBLIX PAYROLL", -72000, date, "INCOME");
+  });
+  detectPaycheckPilotData("user-1", store);
+
+  const setup = buildPayPeriodSetup("user-1", store, "2026-01-16");
+
+  assert.ok(setup.options.includes("weekly"));
+  assert.equal(setup.suggestedSchedule.payFrequency, "weekly");
+  assert.equal(setup.suggestedSchedule.employerName, "PUBLIX PAYROLL");
+  assert.equal(setup.suggestedSchedule.expectedAmount, 72000);
+  assert.equal(setup.suggestedSchedule.paycheckAccountNickname, "Checking");
+  assert.ok(setup.suggestedSchedule.evidence.includes("Detected 3 deposits from PUBLIX PAYROLL every Thursday."));
+});
+
+test("paycheck calendar shows upcoming previous actual variance and missing warnings", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  const period = {
+    id: "period-calendar",
+    userId: "user-1",
+    payFrequency: "weekly",
+    frequency: "weekly",
+    sourceName: "PUBLIX PAYROLL",
+    employerName: "PUBLIX PAYROLL",
+    paycheckAccountId: "acct-1",
+    paycheckAccountNickname: "Checking",
+    lastPayday: "2026-01-08",
+    startDate: "2026-01-08",
+    payPeriodStartDate: "2026-01-08",
+    nextPayday: "2026-01-15",
+    endDate: "2026-01-14",
+    payPeriodEndDate: "2026-01-14",
+    expectedPaycheckCents: 72000,
+    safetyBufferCents: 20000,
+    currentBalanceCents: 150000,
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: []
+  };
+  store.confirmedPaychecks["low"] = {
+    id: "low",
+    userId: "user-1",
+    payerName: "PUBLIX PAYROLL",
+    amountCents: 50000,
+    expectedAmountCents: 72000,
+    payDate: "2026-01-08",
+    confirmedAt: "2026-01-08T12:00:00.000Z"
+  };
+  store.confirmedPaychecks["high"] = {
+    id: "high",
+    userId: "user-1",
+    payerName: "PUBLIX PAYROLL",
+    amountCents: 90000,
+    expectedAmountCents: 72000,
+    payDate: "2026-01-22",
+    confirmedAt: "2026-01-22T12:00:00.000Z"
+  };
+
+  const calendar = buildPaycheckCalendar("user-1", period, store, "2026-01-16");
+
+  assert.ok(calendar.previousPaydays.some((item) => item.date === "2026-01-08" && item.note === "Lower-than-usual paycheck warning"));
+  assert.ok(calendar.previousPaydays.some((item) => item.date === "2026-01-15" && item.note === "Missing paycheck warning"));
+  assert.ok(calendar.upcomingPaydays.some((item) => item.date === "2026-01-22" && item.note === "Higher-than-usual paycheck note"));
+  assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck not marked received"));
+  assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck was lower than usual"));
+  assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck was higher than usual"));
 });
 
 function tx(id, merchantName, amountCents, date, category = "GENERAL_SERVICES") {
