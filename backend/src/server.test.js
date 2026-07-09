@@ -89,16 +89,68 @@ test("detects paycheck income streams from shared transactions", () => {
     ["2026-01-17", -85000],
     ["2026-01-31", -85000]
   ].forEach(([date, amount], index) => {
-    store.bankTransactions[`paycheck-${index}`] = tx(`paycheck-${index}`, "Payroll Deposit", amount, date, "INCOME");
+    store.bankTransactions[`paycheck-${index}`] = tx(`paycheck-${index}`, "PAYROLL ACH", amount, date, "INCOME");
   });
 
   detectIncomeStreams("user-1", Object.values(store.bankTransactions), store);
 
   const streams = Object.values(store.incomeStreams);
   assert.equal(streams.length, 1);
-  assert.equal(streams[0].payerName, "Payroll Deposit");
-  assert.equal(streams[0].cadence, "Biweekly");
+  assert.equal(streams[0].payerName, "PAYROLL ACH");
+  assert.equal(streams[0].cadence, "biweekly");
   assert.equal(streams[0].averageAmountCents, 85000);
+  assert.equal(streams[0].status, "pending");
+  assert.ok(streams[0].reasonDetected.includes("3 similar deposits"));
+  assert.ok(streams[0].confidenceScore >= 0.9);
+});
+
+test("creates review-first paycheck candidates with source details", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  ["2026-01-01", "2026-01-08", "2026-01-15", "2026-01-22"].forEach((date, index) => {
+    store.bankTransactions[`publix-${index}`] = tx(`publix-${index}`, "PUBLIX PAYROLL", -72000, date, "INCOME");
+  });
+
+  detectPaycheckPilotData("user-1", store);
+
+  const candidate = Object.values(store.paycheckCandidates)[0];
+  assert.equal(candidate.sourceName, "PUBLIX PAYROLL");
+  assert.equal(candidate.normalizedSourceName, "publix");
+  assert.equal(candidate.cadence, "weekly");
+  assert.equal(candidate.averageAmountCents, 72000);
+  assert.equal(candidate.averageAmount, 72000);
+  assert.equal(candidate.lastDepositDate, "2026-01-22");
+  assert.equal(candidate.predictedNextPayday, "2026-01-29");
+  assert.equal(candidate.status, "pending");
+  assert.equal(candidate.transactionsUsed.length, 4);
+  assert.ok(candidate.confidenceScore >= 0.9);
+  assert.ok(candidate.reasonDetected.includes("weekly"));
+});
+
+test("detects recurring gig income but ignores one-time transfer app deposits", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  [
+    ["2026-01-03", -4200],
+    ["2026-01-06", -8700],
+    ["2026-01-09", -3900],
+    ["2026-01-13", -7600]
+  ].forEach(([date, amount], index) => {
+    store.bankTransactions[`doordash-${index}`] = tx(`doordash-${index}`, "DOORDASH", amount, date, "INCOME");
+  });
+  store.bankTransactions["venmo-1"] = tx("venmo-1", "VENMO FROM JOHN", -12500, "2026-01-14", "TRANSFER");
+
+  detectPaycheckPilotData("user-1", store);
+
+  const streams = Object.values(store.incomeStreams);
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].sourceName, "DOORDASH");
+  assert.equal(streams[0].cadence, "irregular/gig");
+  assert.equal(streams[0].incomeType, "gig");
+  assert.ok(streams[0].confidenceScore >= 0.6);
+  assert.equal(Object.values(store.paycheckCandidates).length, 1);
 });
 
 test("builds Paycheck Pilot bills before payday and safe-to-spend snapshot", () => {

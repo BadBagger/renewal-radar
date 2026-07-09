@@ -286,6 +286,26 @@ environment variables on the hosted backend. Android opens Plaid Link with the
 backend-created `link_token`, sends the `public_token` to
 `/api/plaid/exchange-public-token`, then calls `/api/plaid/sync-transactions`.
 
+## Paycheck Income Detection
+
+Paycheck Pilot detection is review-first. The backend detects possible income
+sources from normalized transactions, but it does not silently confirm a
+paycheck stream. The app should show `status: "pending"` candidates and let the
+user confirm, edit the schedule, mark as not income, or ignore.
+
+The detector groups possible income by account and normalized source name, then
+classifies cadence as `weekly`, `biweekly`, `semi-monthly`, `monthly`,
+`irregular/gig`, `one-time`, or `unknown`. It scores confidence from recurrence,
+amount stability, source wording, and whether the source looks like payroll,
+employer income, gig income, government benefits, or a recurring transfer.
+
+High-confidence candidates require 3 or more similar deposits on a stable
+cadence. Medium confidence covers 2 similar payroll/employer deposits on a
+likely cadence. Low confidence covers recurring but variable deposits, including
+gig income. One large payroll-like deposit may be surfaced as very low
+confidence for review. One-time Cash App, Venmo, Zelle, PayPal, or similar
+transfers are not treated as paycheck candidates by default.
+
 ## Subscription Detection
 
 Detection groups normalized bank/card transactions by merchant and similar

@@ -805,10 +805,11 @@ function confidenceFor(count, cadence, stableAmount) {
 }
 
 function predictedGapDays(cadence, averageGap) {
-  if (cadence === "Weekly") return 7;
-  if (cadence === "Biweekly") return 14;
+  if (cadence === "Weekly" || cadence === "weekly") return 7;
+  if (cadence === "Biweekly" || cadence === "biweekly") return 14;
+  if (cadence === "semi-monthly") return 15;
   if (cadence === "Every 4 weeks") return 28;
-  if (cadence === "Monthly") return 30;
+  if (cadence === "Monthly" || cadence === "monthly") return 30;
   if (cadence === "Quarterly") return 91;
   if (cadence === "Semiannual") return 182;
   if (cadence === "Annual") return 365;
@@ -1068,29 +1069,47 @@ function detectPaycheckPilotData(userId, currentStore = store) {
 }
 
 function detectIncomeStreams(userId, transactions, currentStore = store) {
-  const income = transactions.filter(isIncomeTransaction);
-  const groups = groupBy(income, (transaction) => `${transaction.plaidAccountId}:${normalizeMerchant(transaction.merchantName || transaction.originalDescription)}`);
+  const income = transactions
+    .map((transaction) => ({ transaction, signal: incomeSignalFor(transaction) }))
+    .filter((item) => item.signal.isPossibleIncome);
+  const groups = groupBy(income, (item) => `${item.transaction.plaidAccountId}:${item.signal.normalizedSourceName}`);
   for (const group of groups.values()) {
-    if (group.length < 1) continue;
-    const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
+    const sortedItems = [...group].sort((a, b) => a.transaction.date.localeCompare(b.transaction.date));
+    const sorted = sortedItems.map((item) => item.transaction);
+    const signals = sortedItems.map((item) => item.signal);
     const gaps = sorted.slice(1).map((transaction, index) => dayDiff(sorted[index].date, transaction.date));
-    const cadence = classifyCadence(sorted, gaps) || (sorted.length >= 2 ? "Recurring" : "Unknown");
+    const cadence = classifyIncomeCadence(sorted, gaps, signals);
     const latest = sorted.at(-1);
-    const averageGap = gaps.length ? gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length : 14;
+    const latestSignal = signals.at(-1);
+    const averageGap = gaps.length ? gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length : incomeDefaultGapDays(cadence);
     const averageAmountCents = Math.round(sorted.reduce((sum, transaction) => sum + Math.abs(transaction.amountCents), 0) / sorted.length);
-    const id = `income-${stableHash(`${latest.plaidAccountId}:${normalizeMerchant(latest.merchantName)}:${averageAmountCents}`)}`;
+    const amountVarianceCents = maxAmountVarianceCents(sorted);
+    const stableAmount = hasStableIncomeAmount(sorted);
+    const confidence = incomeConfidence(sorted.length, cadence, stableAmount, signals);
+    if (!shouldCreateIncomeCandidate(sorted, cadence, confidence, signals)) continue;
+    const id = `income-${stableHash(`${latest.plaidAccountId}:${latestSignal.normalizedSourceName}:${averageAmountCents}`)}`;
     const predictedNextPayDate = addDays(latest.date, predictedGapDays(cadence, averageGap));
     currentStore.incomeStreams[id] = {
       id,
       userId,
       accountId: accountIdForPlaidAccount(userId, latest.plaidAccountId, currentStore),
-      payerName: latest.merchantName || latest.originalDescription || "Paycheck",
+      sourceName: latestSignal.sourceName,
+      normalizedSourceName: latestSignal.normalizedSourceName,
+      payerName: latestSignal.sourceName,
       cadence,
+      incomeType: incomeTypeFor(signals),
       averageAmountCents,
+      averageAmount: averageAmountCents,
+      amountVarianceCents,
       lastPayDate: latest.date,
+      lastDepositDate: latest.date,
       predictedNextPayDate,
+      predictedNextPayday: predictedNextPayDate,
       transactionIds: sorted.map((transaction) => transaction.transactionId || transaction.id),
-      confidenceScore: sorted.length >= 3 && cadence !== "Unknown" ? 0.9 : sorted.length >= 2 ? 0.74 : 0.5,
+      transactionsUsed: sorted.map((transaction) => transaction.transactionId || transaction.id),
+      reasonDetected: incomeReasonDetected(sorted.length, cadence, stableAmount, signals),
+      confidenceScore: confidence,
+      status: "pending",
       updatedAt: nowIso()
     };
   }
@@ -1105,12 +1124,20 @@ function detectPaycheckCandidates(userId, currentStore = store) {
       id,
       userId,
       incomeStreamId: stream.id,
+      sourceName: stream.sourceName || stream.payerName,
+      normalizedSourceName: stream.normalizedSourceName || normalizeMerchant(stream.payerName),
       payerName: stream.payerName,
       expectedAmountCents: stream.averageAmountCents,
+      averageAmount: stream.averageAmountCents,
+      averageAmountCents: stream.averageAmountCents,
+      lastDepositDate: stream.lastDepositDate || stream.lastPayDate,
       predictedPayDate: stream.predictedNextPayDate,
+      predictedNextPayday: stream.predictedNextPayday || stream.predictedNextPayDate,
       cadence: stream.cadence,
       confidenceScore: stream.confidenceScore,
+      transactionsUsed: stream.transactionsUsed || stream.transactionIds || [],
       accountNickname: accountNicknameForAccountId(stream.accountId, currentStore),
+      reasonDetected: stream.reasonDetected || "Detected from recurring deposits.",
       status: "pending",
       createdAt: existing?.createdAt || nowIso(),
       updatedAt: nowIso()
@@ -1238,9 +1265,134 @@ function watchOut(key, userId, payPeriodId, title, message, severity) {
   };
 }
 
+function incomeSignalFor(transaction) {
+  const sourceName = incomeSourceName(transaction);
+  const normalizedSourceName = normalizeIncomeSource(sourceName);
+  const text = `${sourceName} ${transaction.category || ""} ${transaction.paymentChannel || ""}`.toLowerCase();
+  const isInflow = transaction.amountCents < 0 || /\b(credit|deposit|income)\b/.test(text);
+  const payroll = /\b(payroll|paycheck|salary|wages?|paystub|pay\s?roll|dir(?:ect)? dep(?:osit)?|ach credit|ppd id|company payroll)\b/.test(text);
+  const gig = /\b(doordash|door dash|uber|ubereats|uber eats|lyft|instacart|grubhub|shipt|spark driver|roadie|fiverr|upwork|taskrabbit)\b/.test(text);
+  const governmentBenefit = /\b(social security|ssa|ssi|ssdi|unemployment|ui benefit|treasury|irs treas|va benefit|veterans affairs|snap|ebt|state benefit)\b/.test(text);
+  const transferApp = /\b(venmo|cash app|cashapp|zelle|paypal|apple cash|chime transfer|square cash)\b/.test(text);
+  const refundOrReversal = /\b(refund|reversal|return|rebate|cashback|cash back|atm|mobile deposit|check deposit)\b/.test(text);
+  const employerLike = isEmployerLikeSource(normalizedSourceName);
+  return {
+    sourceName,
+    normalizedSourceName,
+    isPossibleIncome: isInflow && !refundOrReversal && (payroll || gig || governmentBenefit || transferApp || employerLike),
+    payroll,
+    gig,
+    governmentBenefit,
+    transferApp,
+    employerLike,
+    reason: payroll ? "payroll wording" :
+      gig ? "gig income source" :
+      governmentBenefit ? "benefit deposit source" :
+      transferApp ? "transfer app deposit" :
+      employerLike ? "employer-like deposit source" : "deposit"
+  };
+}
+
+function incomeSourceName(transaction) {
+  return (transaction.merchantName || transaction.originalDescription || "Unknown income source").trim();
+}
+
+function normalizeIncomeSource(value) {
+  const normalized = normalizeMerchant(value)
+    .replace(/\b(payroll|paycheck|direct deposit|dir dep|ach credit|ach|ppd id|payment|deposit|credit|from)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized || normalizeMerchant(value);
+}
+
+function isEmployerLikeSource(normalizedSourceName) {
+  if (!normalizedSourceName || normalizedSourceName.length < 4) return false;
+  if (/\b(bank|transfer|mobile|deposit|refund|cash|atm|check)\b/.test(normalizedSourceName)) return false;
+  return /\b(inc|llc|corp|co|company|stores?|market|hospital|school|university|city|county|state|publix|walmart|target|amazon|kroger|ups|fedex)\b/.test(normalizedSourceName);
+}
+
+function classifyIncomeCadence(sorted, gaps, signals) {
+  if (!gaps.length) return signals.some((signal) => signal.gig) ? "irregular/gig" : "one-time";
+  const average = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+  const spread = Math.max(...gaps) - Math.min(...gaps);
+  if (average >= 6 && average <= 8 && spread <= 2) return "weekly";
+  if (average >= 13 && average <= 16 && spread <= 3) return "biweekly";
+  if (looksSemiMonthly(sorted, gaps)) return "semi-monthly";
+  if (average >= 25 && average <= 35 && spread <= 7) return "monthly";
+  if (signals.some((signal) => signal.gig) && sorted.length >= 3) return "irregular/gig";
+  return sorted.length >= 3 ? "irregular/gig" : "unknown";
+}
+
+function looksSemiMonthly(sorted, gaps) {
+  if (sorted.length < 3) return false;
+  const average = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+  const spread = Math.max(...gaps) - Math.min(...gaps);
+  const days = sorted.map((transaction) => Number(transaction.date.slice(8, 10)));
+  const hasEarlyMonth = days.some((day) => day <= 7);
+  const hasMidMonth = days.some((day) => day >= 13 && day <= 18);
+  const hasEndMonth = days.some((day) => day >= 27);
+  return average >= 13 && average <= 18 && spread <= 6 && ((hasEarlyMonth && hasMidMonth) || (hasMidMonth && hasEndMonth));
+}
+
+function incomeDefaultGapDays(cadence) {
+  if (cadence === "weekly") return 7;
+  if (cadence === "biweekly") return 14;
+  if (cadence === "semi-monthly") return 15;
+  if (cadence === "monthly") return 30;
+  return 14;
+}
+
+function maxAmountVarianceCents(sorted) {
+  const amounts = sorted.map((transaction) => Math.abs(transaction.amountCents));
+  if (!amounts.length) return 0;
+  return Math.max(...amounts) - Math.min(...amounts);
+}
+
+function hasStableIncomeAmount(sorted) {
+  if (sorted.length < 2) return true;
+  const amounts = sorted.map((transaction) => Math.abs(transaction.amountCents));
+  const average = amounts.reduce((sum, amount) => sum + amount, 0) / amounts.length;
+  const variance = Math.max(...amounts) - Math.min(...amounts);
+  return variance <= 5000 || variance <= average * 0.12;
+}
+
+function incomeConfidence(count, cadence, stableAmount, signals) {
+  const strongSource = signals.some((signal) => signal.payroll || signal.employerLike || signal.governmentBenefit);
+  const transferOnly = signals.every((signal) => signal.transferApp);
+  if (transferOnly && count < 3) return 0.18;
+  if (count >= 3 && stableAmount && ["weekly", "biweekly", "semi-monthly", "monthly"].includes(cadence) && strongSource) return 0.92;
+  if (count >= 3 && ["weekly", "biweekly", "semi-monthly", "monthly"].includes(cadence)) return 0.82;
+  if (count >= 2 && stableAmount && ["weekly", "biweekly", "semi-monthly", "monthly"].includes(cadence) && strongSource) return 0.68;
+  if (count >= 3 && cadence === "irregular/gig") return signals.some((signal) => signal.gig) ? 0.66 : 0.48;
+  if (count === 1 && strongSource) return 0.25;
+  return 0.2;
+}
+
+function shouldCreateIncomeCandidate(sorted, cadence, confidence, signals) {
+  const transferOnly = signals.every((signal) => signal.transferApp);
+  if (transferOnly && sorted.length < 3) return false;
+  if (signals.some((signal) => signal.gig) && sorted.length >= 3) return true;
+  if (confidence >= 0.45) return true;
+  return sorted.length === 1 && confidence >= 0.25;
+}
+
+function incomeTypeFor(signals) {
+  if (signals.some((signal) => signal.gig)) return "gig";
+  if (signals.some((signal) => signal.governmentBenefit)) return "benefit";
+  if (signals.every((signal) => signal.transferApp)) return "recurring_transfer";
+  return "paycheck";
+}
+
+function incomeReasonDetected(count, cadence, stableAmount, signals) {
+  const source = signals.find((signal) => signal.payroll || signal.employerLike || signal.gig || signal.governmentBenefit || signal.transferApp);
+  if (count >= 3 && stableAmount && cadence !== "irregular/gig") return `Detected ${count} similar deposits on a ${cadence} cadence from ${source?.reason || "the same source"}.`;
+  if (count >= 2 && cadence !== "unknown") return `Detected ${count} deposits from the same source with a likely ${cadence} pattern.`;
+  if (cadence === "irregular/gig") return `Detected recurring variable deposits that look like ${source?.gig ? "gig income" : "income"}.`;
+  return `Detected one income-like deposit from ${source?.reason || "the same source"}; needs review.`;
+}
+
 function isIncomeTransaction(transaction) {
-  const text = `${transaction.merchantName} ${transaction.originalDescription || ""} ${transaction.category || ""}`.toLowerCase();
-  return transaction.amountCents < 0 || ["payroll", "paycheck", "salary", "income", "direct deposit", "deposit"].some((term) => text.includes(term));
+  return incomeSignalFor(transaction).isPossibleIncome;
 }
 
 function likelyBill(candidate) {
