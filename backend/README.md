@@ -208,9 +208,28 @@ Request body:
 
 ### `GET /api/paycheck/bills-before-payday`
 
-Returns detected recurring bills expected before the current pay period's next
-payday, including amount, due date, account nickname, category, and detection
-confidence.
+Returns the sectioned "Bills before payday" review screen. Sources include
+manual pay-period bills, Renewal Radar-style confirmed recurring charges,
+user-confirmed subscriptions/utilities/bills, and detected recurring outflows
+from bank sync.
+
+Response sections:
+
+- `dueBeforePayday`: confirmed/manual included items expected before payday.
+- `dueAfterPayday`: confirmed/manual included items expected after payday.
+- `needsReview`: detected bank-sync items that are not auto-confirmed.
+- `ignored`: ignored or excluded bills/subscriptions/candidates.
+
+Each card includes name, expected amount, due/charge date, category, confidence,
+source (`manual`, `bank sync`, or `Renewal Radar`), account/card nickname,
+include/exclude toggle metadata, edit action metadata, and review status. The
+summary includes total due before payday, biggest upcoming charge, days until
+payday, and safe-to-spend impact. Watch-outs call out bills before payday,
+larger charges, possible duplicates, amount increases, and charges that usually
+hit earlier than expected.
+
+Detected bills are never silently confirmed. Android should show `needsReview`
+items with confirm/edit/ignore controls before treating them as user-confirmed.
 
 ### `GET /api/paycheck/safe-to-spend`
 

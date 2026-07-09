@@ -445,19 +445,20 @@ async function handlePaycheckDecision(req, res, userId, decision) {
 function handleBillsBeforePayday(res, userId, url) {
   detectPaycheckPilotData(userId);
   const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
-  const bills = billsBeforePayday(userId, current);
+  const view = buildBillsBeforePaydayView(userId, current, store);
+  const bills = view.sections.dueBeforePayday;
   const snapshotId = `bbp-${userId}-${current.startDate}-${current.nextPayday}`;
   store.billBeforePaydaySnapshots[snapshotId] = {
     id: snapshotId,
     userId,
     payPeriodId: current.id,
     nextPayday: current.nextPayday,
-    billIds: bills.map((bill) => bill.id),
-    totalCents: bills.reduce((sum, bill) => sum + bill.amountCents, 0),
+    billIds: view.allItems.map((bill) => bill.id),
+    totalCents: view.summary.totalDueBeforePaydayCents,
     createdAt: nowIso()
   };
   saveStore(store);
-  return sendJson(res, 200, { payPeriod: current, bills, totalCents: store.billBeforePaydaySnapshots[snapshotId].totalCents });
+  return sendJson(res, 200, view);
 }
 
 function handleSafeToSpend(res, userId, url) {
@@ -1338,6 +1339,198 @@ function buildPaycheckWatchOuts(userId, payPeriod, currentStore = store) {
   return safe.watchOuts;
 }
 
+function buildBillsBeforePaydayView(userId, payPeriod, currentStore = store) {
+  const allItems = allBillReviewItems(userId, payPeriod, currentStore);
+  const dueBeforePayday = allItems
+    .filter((item) => item.included && item.reviewStatus === "confirmed" && item.expectedDate <= payPeriod.nextPayday)
+    .sort(compareBillCards);
+  const dueAfterPayday = allItems
+    .filter((item) => item.included && item.reviewStatus === "confirmed" && item.expectedDate > payPeriod.nextPayday)
+    .sort(compareBillCards);
+  const needsReview = allItems
+    .filter((item) => item.reviewStatus === "pending")
+    .sort(compareBillCards);
+  const ignored = allItems
+    .filter((item) => item.reviewStatus === "ignored" || !item.included)
+    .sort(compareBillCards);
+  const safe = buildSafeToSpendSnapshot(userId, payPeriod, currentStore);
+  const biggestUpcomingCharge = dueBeforePayday.reduce((biggest, item) => (
+    !biggest || item.amountCents > biggest.amountCents ? item : biggest
+  ), null);
+  const summary = {
+    totalDueBeforePaydayCents: sumCents(dueBeforePayday),
+    totalDueBeforePayday: sumCents(dueBeforePayday),
+    biggestUpcomingCharge,
+    daysUntilPayday: Math.max(0, dayDiff(todayIso(), payPeriod.nextPayday)),
+    safeToSpendImpactCents: sumCents(dueBeforePayday),
+    safeToSpendImpact: sumCents(dueBeforePayday),
+    safeToSpendAfterBillsCents: safe.safeToSpendTotalCents,
+    needsReviewCount: needsReview.length,
+    ignoredCount: ignored.length
+  };
+  return {
+    title: "Bills before payday",
+    payPeriod,
+    nextPayday: payPeriod.nextPayday,
+    sections: {
+      dueBeforePayday,
+      dueAfterPayday,
+      needsReview,
+      ignored
+    },
+    summary,
+    watchOuts: buildBillsBeforePaydayWatchOuts(userId, payPeriod, dueBeforePayday, needsReview, currentStore),
+    allItems
+  };
+}
+
+function allBillReviewItems(userId, payPeriod, currentStore = store) {
+  const excludedCandidates = new Set(payPeriod.excludedCandidateIds || []);
+  const excludedSubscriptions = new Set(payPeriod.excludedSubscriptionIds || []);
+  const excludedAccounts = new Set(payPeriod.excludedAccountIds || []);
+  const manual = (payPeriod.manualBills || []).map((bill, index) => billCard({
+    id: bill.id || `manual-bill-${stableHash(`${payPeriod.id}:${bill.name}:${bill.dueDate || index}:${bill.amountCents}`)}`,
+    userId,
+    name: bill.name || "Manual bill",
+    amountCents: Number(bill.amountCents || 0),
+    expectedDate: bill.dueDate || payPeriod.nextPayday,
+    category: bill.category || "Manual bill",
+    confidenceScore: 1,
+    source: "manual",
+    accountNickname: "Manual entry",
+    reviewStatus: "confirmed",
+    included: true,
+    includeToggle: { type: "manualBill", id: bill.id || `manual-${index}`, included: true },
+    canEdit: true
+  }));
+  const confirmed = Object.values(currentStore.confirmedSubscriptions)
+    .filter((item) => item.userId === userId)
+    .map((item) => {
+      const excluded = excludedSubscriptions.has(item.id) || excludedAccounts.has(item.sourceAccountId);
+      return billCard({
+        id: `confirmed-${item.id}`,
+        userId,
+        name: item.merchantName,
+        amountCents: Number(item.amountCents || 0),
+        expectedDate: item.nextChargeDate || payPeriod.nextPayday,
+        category: likelyBill(item) ? "Confirmed bill" : "Confirmed subscription",
+        confidenceScore: 1,
+        source: "Renewal Radar",
+        accountNickname: accountNicknameForAccountId(item.sourceAccountId, currentStore),
+        reviewStatus: excluded ? "ignored" : "confirmed",
+        included: !excluded,
+        includeToggle: { type: "subscription", id: item.id, included: !excluded },
+        canEdit: true,
+        subscriptionId: item.id
+      });
+    });
+  const detected = Object.values(currentStore.subscriptionCandidates)
+    .filter((candidate) => candidate.userId === userId)
+    .map((candidate) => {
+      const excluded = excludedCandidates.has(candidate.id) || excludedAccounts.has(candidate.accountId);
+      const ignored = ["ignored", "dismissed"].includes(candidate.status) || excluded;
+      return billCard({
+        id: `detected-${candidate.id}`,
+        userId,
+        name: candidate.merchantName,
+        amountCents: Number(candidate.amountCents || candidate.averageAmountCents || 0),
+        expectedDate: candidate.nextChargeDate || payPeriod.nextPayday,
+        windowStart: candidate.nextChargeWindowStart,
+        windowEnd: candidate.nextChargeWindowEnd,
+        category: candidate.candidateType === "bill" || likelyBill(candidate) ? "Detected bill" : "Detected subscription",
+        confidenceScore: candidate.confidenceScore,
+        source: "bank sync",
+        accountNickname: candidate.accountNickname || accountNicknameForAccountId(candidate.accountId, currentStore),
+        reviewStatus: ignored ? "ignored" : "pending",
+        included: !ignored,
+        includeToggle: { type: "candidate", id: candidate.id, included: !ignored },
+        canEdit: true,
+        candidateId: candidate.id,
+        watchOuts: candidate.watchOuts || []
+      });
+    });
+  return [...manual, ...confirmed, ...detected].filter((item) => item.amountCents > 0);
+}
+
+function billCard(input) {
+  return {
+    id: input.id,
+    userId: input.userId,
+    name: input.name,
+    merchantName: input.name,
+    expectedAmountCents: input.amountCents,
+    amountCents: input.amountCents,
+    dueDate: input.expectedDate,
+    expectedDate: input.expectedDate,
+    windowStart: input.windowStart || null,
+    windowEnd: input.windowEnd || null,
+    category: input.category,
+    confidenceScore: input.confidenceScore ?? 0.5,
+    confidence: confidenceLabel(input.confidenceScore ?? 0.5),
+    source: input.source,
+    accountNickname: input.accountNickname || "Connected account",
+    included: input.included,
+    includeToggle: input.includeToggle,
+    canEdit: input.canEdit !== false,
+    editAction: input.canEdit === false ? null : { type: input.includeToggle?.type || "bill", id: input.includeToggle?.id || input.id },
+    reviewStatus: input.reviewStatus,
+    status: input.reviewStatus,
+    candidateId: input.candidateId || null,
+    subscriptionId: input.subscriptionId || null,
+    watchOuts: input.watchOuts || []
+  };
+}
+
+function buildBillsBeforePaydayWatchOuts(userId, payPeriod, dueBeforePayday, needsReview, currentStore = store) {
+  const watchOuts = [];
+  for (const item of dueBeforePayday) {
+    watchOuts.push(watchOut(`bill-due-${item.id}`, userId, payPeriod.id, `${item.name} is before payday`, `Expected ${item.dueDate} for ${formatCents(item.amountCents)}.`, "medium"));
+  }
+  const largeThreshold = Math.max(20000, Math.round(sumCents(dueBeforePayday) * 0.35));
+  for (const item of dueBeforePayday.filter((bill) => bill.amountCents >= largeThreshold)) {
+    watchOuts.push(watchOut(`large-bill-${item.id}`, userId, payPeriod.id, `${item.name} is a larger charge`, `${formatCents(item.amountCents)} is one of the bigger charges before payday.`, "medium"));
+  }
+  const duplicates = duplicateBillGroups([...dueBeforePayday, ...needsReview]);
+  for (const group of duplicates) {
+    watchOuts.push(watchOut(`duplicate-${stableHash(group.map((item) => item.id).join(":"))}`, userId, payPeriod.id, "Possible duplicate bill", `${group.map((item) => item.name).join(" and ")} look similar.`, "low"));
+  }
+  for (const item of needsReview.filter((bill) => bill.watchOuts.includes("Price increased"))) {
+    watchOuts.push(watchOut(`increased-${item.id}`, userId, payPeriod.id, `${item.name} may be higher than usual`, "Review the detected amount before counting it in your plan.", "medium"));
+  }
+  for (const item of needsReview.filter((bill) => bill.watchOuts.includes("Charged earlier than usual"))) {
+    watchOuts.push(watchOut(`early-${item.id}`, userId, payPeriod.id, `${item.name} may hit early`, "This charge has posted earlier than expected before.", "medium"));
+  }
+  if (needsReview.length) {
+    watchOuts.push(watchOut("needs-review", userId, payPeriod.id, "Some charges need review", `${needsReview.length} detected charge${needsReview.length === 1 ? "" : "s"} should be confirmed or ignored.`, "low"));
+  }
+  return uniqueWatchOuts(watchOuts);
+}
+
+function duplicateBillGroups(items) {
+  const groups = groupBy(items, (item) => normalizeMerchant(item.name));
+  return [...groups.values()].filter((group) => group.length > 1);
+}
+
+function confidenceLabel(score) {
+  if (score >= 0.85) return "high";
+  if (score >= 0.65) return "medium";
+  if (score >= 0.4) return "low";
+  return "needs review";
+}
+
+function compareBillCards(a, b) {
+  return (a.expectedDate || "").localeCompare(b.expectedDate || "") || a.name.localeCompare(b.name);
+}
+
+function uniqueWatchOuts(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
 function manualBillsBeforePayday(userId, payPeriod) {
   return (payPeriod.manualBills || [])
     .filter((bill) => !bill.dueDate || bill.dueDate <= payPeriod.nextPayday)
@@ -1929,6 +2122,7 @@ function redact(value) {
 export {
   addDays,
   billsBeforePayday,
+  buildBillsBeforePaydayView,
   buildSafeToSpendSnapshot,
   dayDiff,
   detectCandidates,

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   addDays,
   billsBeforePayday,
+  buildBillsBeforePaydayView,
   buildSafeToSpendSnapshot,
   currentPayPeriod,
   dayDiff,
@@ -264,6 +265,121 @@ test("safe-to-spend engine supports manual overrides and exclusions", () => {
   assert.equal(snapshot.committedBills, 0);
   assert.equal(snapshot.safeToSpendTotal, 130000);
   assert.ok(snapshot.confidenceScore < 0.95);
+});
+
+test("bills before payday view sections manual confirmed detected and ignored bills", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  store.connectedAccounts["card-1"] = { id: "card-1", userId: "user-1", plaidAccountId: "card-1", name: "Rewards Card" };
+  store.confirmedSubscriptions["rent"] = {
+    id: "rent",
+    userId: "user-1",
+    merchantName: "Rent",
+    amountCents: 85000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-10",
+    sourceAccountId: "acct-1"
+  };
+  store.confirmedSubscriptions["internet"] = {
+    id: "internet",
+    userId: "user-1",
+    merchantName: "Internet",
+    amountCents: 6500,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-20",
+    sourceAccountId: "acct-1"
+  };
+  store.confirmedSubscriptions["old-gym"] = {
+    id: "old-gym",
+    userId: "user-1",
+    merchantName: "Old Gym",
+    amountCents: 2999,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-09",
+    sourceAccountId: "card-1"
+  };
+  store.subscriptionCandidates["netflix"] = {
+    id: "netflix",
+    userId: "user-1",
+    accountId: "card-1",
+    merchantName: "Netflix",
+    amountCents: 1599,
+    averageAmountCents: 1599,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-12",
+    nextChargeWindowStart: "2026-01-11",
+    nextChargeWindowEnd: "2026-01-13",
+    category: "ENTERTAINMENT",
+    candidateType: "subscription",
+    confidenceScore: 0.82,
+    status: "pending",
+    watchOuts: ["Price increased"]
+  };
+  store.subscriptionCandidates["duplicate-rent"] = {
+    id: "duplicate-rent",
+    userId: "user-1",
+    accountId: "acct-1",
+    merchantName: "Rent",
+    amountCents: 85000,
+    averageAmountCents: 85000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-10",
+    category: "RENT",
+    candidateType: "bill",
+    confidenceScore: 0.74,
+    status: "pending",
+    watchOuts: ["Duplicate charge suspected", "Charged earlier than usual"]
+  };
+  store.subscriptionCandidates["ignored-phone"] = {
+    id: "ignored-phone",
+    userId: "user-1",
+    accountId: "acct-1",
+    merchantName: "Phone",
+    amountCents: 5000,
+    averageAmountCents: 5000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-08",
+    category: "PHONE",
+    candidateType: "bill",
+    confidenceScore: 0.7,
+    status: "ignored",
+    watchOuts: []
+  };
+  const period = {
+    id: "period-bills",
+    userId: "user-1",
+    startDate: "2026-01-01",
+    nextPayday: "2026-01-15",
+    expectedPaycheckCents: 90000,
+    currentBalanceCents: 150000,
+    safetyBufferCents: 20000,
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [{ id: "phone-manual", name: "Phone bill", amountCents: 6000, dueDate: "2026-01-11", category: "Phone" }],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: ["old-gym"]
+  };
+
+  const view = buildBillsBeforePaydayView("user-1", period, store);
+
+  assert.equal(view.title, "Bills before payday");
+  assert.deepEqual(view.sections.dueBeforePayday.map((item) => item.name), ["Rent", "Phone bill"]);
+  assert.deepEqual(view.sections.dueAfterPayday.map((item) => item.name), ["Internet"]);
+  assert.ok(view.sections.needsReview.some((item) => item.name === "Netflix" && item.source === "bank sync"));
+  assert.ok(view.sections.needsReview.some((item) => item.name === "Rent" && item.includeToggle.type === "candidate"));
+  assert.ok(view.sections.ignored.some((item) => item.name === "Old Gym" && item.included === false));
+  assert.ok(view.sections.ignored.some((item) => item.name === "Phone"));
+  assert.equal(view.summary.totalDueBeforePayday, 91000);
+  assert.equal(view.summary.biggestUpcomingCharge.name, "Rent");
+  assert.ok(view.summary.daysUntilPayday >= 0);
+  assert.ok(view.watchOuts.some((item) => item.title.includes("Possible duplicate bill")));
+  assert.ok(view.watchOuts.some((item) => item.title.includes("may be higher than usual")));
 });
 
 function tx(id, merchantName, amountCents, date, category = "GENERAL_SERVICES") {
