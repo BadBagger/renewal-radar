@@ -196,6 +196,55 @@ fun RenewalRadarRoot(
             }
         }
     }
+
+    if (!state.settings.firstLaunchSetupComplete) {
+        FirstLaunchSetupDialog(
+            onAddFirstRenewal = {
+                onSettingsChange(state.settings.copy(firstLaunchSetupComplete = true))
+                navController.navigate("edit/0") { launchSingleTop = true }
+            },
+            onConnectAccounts = {
+                onSettingsChange(state.settings.copy(firstLaunchSetupComplete = true))
+                navController.navigate("accounts") { launchSingleTop = true }
+            },
+            onSkip = {
+                onSettingsChange(state.settings.copy(firstLaunchSetupComplete = true))
+            }
+        )
+    }
+}
+
+@Composable
+private fun FirstLaunchSetupDialog(
+    onAddFirstRenewal: () -> Unit,
+    onConnectAccounts: () -> Unit,
+    onSkip: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onSkip,
+        title = { Text("Set up Renewal Radar") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Add renewals manually now, or connect banks and cards later from Connected Accounts.")
+                Text("Bank sync uses Plaid Link and requires the secure backend. Manual renewal tracking works without it.")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAddFirstRenewal) {
+                Text("Add renewal")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onConnectAccounts) {
+                    Text("Connected Accounts")
+                }
+                TextButton(onClick = onSkip) {
+                    Text("Not now")
+                }
+            }
+        }
+    )
 }
 
 @Composable

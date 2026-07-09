@@ -33,6 +33,10 @@ class BankConnectionRepository(
         )
     }
 
+    suspend fun clearConnectingPlaceholder() {
+        bankDao.deleteAccountById(CONNECTING_PLACEHOLDER_ID)
+    }
+
     suspend fun disconnect(accountId: String) {
         backendApi.disconnectAccount(accountId)
         bankDao.markDisconnected(accountId)

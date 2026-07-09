@@ -120,7 +120,8 @@ class RenewalViewModel(
                 pendingPlaidLinkToken.value = linkToken.token
                 bankMessage.value = "Opening Plaid Link..."
             }.onFailure { error ->
-                connectionState.value = BankConnectionStatus.SyncFailed
+                bankConnectionRepository.clearConnectingPlaceholder()
+                connectionState.value = BankConnectionStatus.Disconnected
                 bankMessage.value = error.toBankErrorMessage("Backend unavailable. Try again later.")
             }
         }
@@ -133,6 +134,7 @@ class RenewalViewModel(
     fun handlePlaidSuccess(publicToken: String, metadata: PlaidLinkMetadata) {
         viewModelScope.launch {
             if (metadata.accounts.isEmpty()) {
+                bankConnectionRepository.clearConnectingPlaceholder()
                 connectionState.value = BankConnectionStatus.Disconnected
                 bankMessage.value = "No supported checking, savings, or credit card accounts were found."
                 return@launch
