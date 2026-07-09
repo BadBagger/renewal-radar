@@ -348,8 +348,27 @@ and add manual paycheck.
 
 ### `GET /api/paycheck/watch-outs`
 
-Returns non-judgmental warnings such as "You may run short", "Build a bigger
-buffer if you can", or upcoming bills that may hit before the next paycheck.
+Returns active Paycheck Pilot watch-outs from bank transactions, detected
+paychecks, confirmed/manual paychecks, recurring charges, and safe-to-spend
+snapshots. Watch-outs use plain, non-alarming language and include actions for
+`dismiss`, `edit`, and `correct`.
+
+Supported types:
+
+- `paycheck_lower_than_usual`: "This paycheck looks $82 lower than usual."
+- `paycheck_missing`: "Expected paycheck not found yet."
+- `bill_before_payday`: "Car insurance is expected before payday."
+- `safe_to_spend_low`: "Low spending room until payday."
+- `duplicate_charge_suspected`: "Possible duplicate charge."
+- `subscription_price_increased`: "Spotify increased by $2."
+- `income_pattern_changed`: "Paycheck timing may have changed."
+
+Dismissed watch-outs are filtered from the active response so the app does not
+keep nagging about an item the user already handled.
+
+### `POST /api/paycheck/watch-outs/{id}/dismiss`
+
+Dismisses a watch-out. Request body can include an optional `reason`.
 
 ### `GET /api/account/export`
 

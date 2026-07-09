@@ -5,6 +5,7 @@ import {
   billsBeforePayday,
   buildBillsBeforePaydayView,
   buildPaycheckCalendar,
+  buildPaycheckWatchOuts,
   buildPayPeriodSetup,
   buildSafeToSpendSnapshot,
   currentPayPeriod,
@@ -463,6 +464,106 @@ test("paycheck calendar shows upcoming previous actual variance and missing warn
   assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck not marked received"));
   assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck was lower than usual"));
   assert.ok(calendar.watchOuts.some((item) => item.title === "Paycheck was higher than usual"));
+});
+
+test("paycheck watch-outs detect lower pay missing pay bills duplicates increases and pattern changes", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  store.connectedAccounts["card-1"] = { id: "card-1", userId: "user-1", plaidAccountId: "card-1", name: "Card" };
+  [
+    ["2026-01-01", -90000],
+    ["2026-01-08", -90000],
+    ["2026-01-15", -81800]
+  ].forEach(([date, amount], index) => {
+    store.bankTransactions[`pay-${index}`] = tx(`pay-${index}`, "PUBLIX PAYROLL", amount, date, "INCOME");
+  });
+  store.bankTransactions["dup-1"] = tx("dup-1", "Spotify", 1199, "2026-01-07", "ENTERTAINMENT");
+  store.bankTransactions["dup-2"] = tx("dup-2", "Spotify", 1199, "2026-01-08", "ENTERTAINMENT");
+  store.bankTransactions["spot-old"] = tx("spot-old", "Spotify", 999, "2025-12-08", "ENTERTAINMENT");
+  store.bankTransactions["spot-new"] = tx("spot-new", "Spotify", 1199, "2026-01-08", "ENTERTAINMENT");
+  detectPaycheckPilotData("user-1", store);
+  const stream = Object.values(store.incomeStreams)[0];
+  stream.confidenceScore = 0.6;
+  store.subscriptionCandidates["spotify"] = {
+    id: "spotify",
+    userId: "user-1",
+    accountId: "card-1",
+    merchantName: "Spotify",
+    amountCents: 1199,
+    averageAmountCents: 1099,
+    amountVarianceCents: 200,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-14",
+    category: "ENTERTAINMENT",
+    candidateType: "subscription",
+    confidenceScore: 0.86,
+    status: "pending",
+    transactionsUsed: ["spot-old", "spot-new"],
+    watchOuts: ["Price increased", "Duplicate charge suspected"]
+  };
+  store.confirmedSubscriptions["insurance"] = {
+    id: "insurance",
+    userId: "user-1",
+    merchantName: "Car insurance",
+    amountCents: 32000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-20",
+    sourceAccountId: "acct-1"
+  };
+  const period = {
+    id: "period-watch",
+    userId: "user-1",
+    payFrequency: "weekly",
+    frequency: "weekly",
+    sourceName: "PUBLIX PAYROLL",
+    employerName: "PUBLIX PAYROLL",
+    paycheckAccountId: "acct-1",
+    paycheckAccountNickname: "Checking",
+    lastPayday: "2026-01-15",
+    startDate: "2026-01-15",
+    payPeriodStartDate: "2026-01-15",
+    nextPayday: "2026-01-22",
+    endDate: "2026-01-21",
+    payPeriodEndDate: "2026-01-21",
+    expectedPaycheckCents: 90000,
+    currentBalanceCents: 35000,
+    safetyBufferCents: 10000,
+    safeToSpendLowThresholdCents: 5000,
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: []
+  };
+
+  const watchOuts = buildPaycheckWatchOuts("user-1", period, store, "2026-01-23");
+  const types = new Set(watchOuts.map((item) => item.type));
+
+  assert.ok(types.has("paycheck_lower_than_usual"));
+  assert.ok(types.has("paycheck_missing"));
+  assert.ok(types.has("bill_before_payday"));
+  assert.ok(types.has("safe_to_spend_low"));
+  assert.ok(types.has("duplicate_charge_suspected"));
+  assert.ok(types.has("subscription_price_increased"));
+  assert.ok(types.has("income_pattern_changed"));
+  assert.ok(watchOuts.some((item) => item.message === "This paycheck looks $82.00 lower than usual."));
+  assert.ok(watchOuts.some((item) => item.message === "Expected paycheck not found yet."));
+  assert.ok(watchOuts.some((item) => item.message === "Car insurance is expected before payday."));
+  assert.ok(watchOuts.some((item) => item.message === "Low spending room until payday."));
+  assert.ok(watchOuts.some((item) => item.message === "Possible duplicate charge."));
+  assert.ok(watchOuts.some((item) => item.message === "Spotify increased by $2.00."));
+  assert.ok(watchOuts.every((item) => item.actions.some((action) => action.id === "dismiss")));
+
+  const dismissedId = watchOuts.find((item) => item.type === "duplicate_charge_suspected").id;
+  store.paycheckWatchOuts[dismissedId] = { ...watchOuts.find((item) => item.id === dismissedId), dismissedAt: "2026-01-23T12:00:00.000Z" };
+  const afterDismiss = buildPaycheckWatchOuts("user-1", period, store, "2026-01-23");
+  assert.equal(afterDismiss.some((item) => item.id === dismissedId), false);
 });
 
 function tx(id, merchantName, amountCents, date, category = "GENERAL_SERVICES") {

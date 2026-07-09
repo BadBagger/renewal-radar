@@ -160,6 +160,11 @@ const server = http.createServer(async (req, res) => {
       return handlePaycheckWatchOuts(res, userId, url);
     }
 
+    const dismissPaycheckWatchOutMatch = url.pathname.match(/^\/api\/paycheck\/watch-outs\/([^/]+)\/dismiss$/);
+    if (req.method === "POST" && dismissPaycheckWatchOutMatch) {
+      return handleDismissPaycheckWatchOut(req, res, userId, dismissPaycheckWatchOutMatch[1]);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/account/export") {
       return handleExport(res, userId);
     }
@@ -604,10 +609,44 @@ function handlePaycheckCalendar(res, userId, url) {
 function handlePaycheckWatchOuts(res, userId, url) {
   detectPaycheckPilotData(userId);
   const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
-  const watchOuts = buildPaycheckWatchOuts(userId, current);
-  for (const item of watchOuts) store.paycheckWatchOuts[item.id] = item;
+  const watchOuts = buildPaycheckWatchOuts(userId, current, store, url.searchParams.get("asOf") || todayIso());
+  for (const item of watchOuts) {
+    const previous = store.paycheckWatchOuts[item.id];
+    store.paycheckWatchOuts[item.id] = {
+      ...item,
+      dismissedAt: previous?.dismissedAt || null,
+      status: previous?.dismissedAt ? "dismissed" : item.status
+    };
+  }
   saveStore(store);
-  return sendJson(res, 200, { watchOuts });
+  return sendJson(res, 200, {
+    watchOuts: watchOuts.filter((item) => !store.paycheckWatchOuts[item.id]?.dismissedAt),
+    dismissed: Object.values(store.paycheckWatchOuts).filter((item) => item.userId === userId && item.dismissedAt)
+  });
+}
+
+async function handleDismissPaycheckWatchOut(req, res, userId, watchOutId) {
+  const body = await readJson(req).catch(() => ({}));
+  const existing = store.paycheckWatchOuts[watchOutId] || {
+    id: watchOutId,
+    userId,
+    payPeriodId: body.payPeriodId || null,
+    title: body.title || "Dismissed watch-out",
+    message: body.message || "",
+    severity: body.severity || "low",
+    actions: watchOutActions(),
+    createdAt: nowIso()
+  };
+  if (existing.userId !== userId) return sendJson(res, 404, { error: "watch_out_not_found" });
+  store.paycheckWatchOuts[watchOutId] = {
+    ...existing,
+    status: "dismissed",
+    dismissedAt: nowIso(),
+    dismissedReason: body.reason || ""
+  };
+  audit(userId, "paycheck.watch_out.dismissed", { watchOutId });
+  saveStore(store);
+  return sendJson(res, 200, { watchOut: store.paycheckWatchOuts[watchOutId] });
 }
 
 async function handleDisconnect(req, res, userId) {
@@ -1554,9 +1593,106 @@ function buildSafeToSpendSnapshot(userId, payPeriod, currentStore = store) {
   };
 }
 
-function buildPaycheckWatchOuts(userId, payPeriod, currentStore = store) {
+function buildPaycheckWatchOuts(userId, payPeriod, currentStore = store, asOf = todayIso()) {
   const safe = buildSafeToSpendSnapshot(userId, payPeriod, currentStore);
-  return safe.watchOuts;
+  const billsView = buildBillsBeforePaydayView(userId, payPeriod, currentStore);
+  const calendar = buildPaycheckCalendar(userId, payPeriod, currentStore, asOf);
+  const watchOuts = [
+    ...paycheckAmountWatchOuts(userId, payPeriod, currentStore),
+    ...missingPaycheckWatchOuts(userId, payPeriod, calendar, asOf),
+    ...billBeforePaydayWatchOuts(userId, payPeriod, billsView),
+    ...safeToSpendLowWatchOuts(userId, payPeriod, safe),
+    ...duplicateChargeWatchOuts(userId, payPeriod, currentStore),
+    ...subscriptionIncreaseWatchOuts(userId, payPeriod, currentStore),
+    ...incomePatternChangedWatchOuts(userId, payPeriod, currentStore)
+  ];
+  return uniqueWatchOuts(watchOuts).filter((item) => !currentStore.paycheckWatchOuts[item.id]?.dismissedAt);
+}
+
+function paycheckAmountWatchOuts(userId, payPeriod, currentStore = store) {
+  const stream = strongestIncomeStream(userId, currentStore);
+  const deposits = incomeTransactionsForStream(userId, stream, currentStore);
+  const watchOuts = [];
+  if (deposits.length >= 2) {
+    const latest = deposits.at(-1);
+    const previous = deposits.slice(0, -1);
+    const average = Math.round(previous.reduce((sum, item) => sum + Math.abs(item.amountCents), 0) / previous.length);
+    const latestAmount = Math.abs(latest.amountCents);
+    const diff = average - latestAmount;
+    if (diff >= Math.max(2500, Math.round(average * 0.05))) {
+      watchOuts.push(paycheckWatchOut("paycheck-lower", userId, payPeriod.id, "paycheck_lower_than_usual", "Paycheck lower than usual", `This paycheck looks ${formatCents(diff)} lower than usual.`, "medium", { amountDeltaCents: diff, transactionId: latest.transactionId || latest.id }));
+    }
+  }
+  const latestConfirmed = Object.values(currentStore.confirmedPaychecks)
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => b.payDate.localeCompare(a.payDate))[0];
+  if (latestConfirmed?.expectedAmountCents && latestConfirmed.amountCents < Math.round(latestConfirmed.expectedAmountCents * 0.9)) {
+    const diff = latestConfirmed.expectedAmountCents - latestConfirmed.amountCents;
+    watchOuts.push(paycheckWatchOut("confirmed-paycheck-lower", userId, payPeriod.id, "paycheck_lower_than_usual", "Paycheck lower than usual", `This paycheck looks ${formatCents(diff)} lower than usual.`, "medium", { amountDeltaCents: diff, paycheckId: latestConfirmed.id }));
+  }
+  return watchOuts;
+}
+
+function missingPaycheckWatchOuts(userId, payPeriod, calendar, asOf) {
+  return calendar.events
+    .filter((event) => event.date < asOf && event.status === "expected")
+    .slice(0, 2)
+    .map((event) => paycheckWatchOut(`paycheck-missing-${event.date}`, userId, payPeriod.id, "paycheck_missing", "Expected paycheck not found yet", "Expected paycheck not found yet.", "medium", { date: event.date }));
+}
+
+function billBeforePaydayWatchOuts(userId, payPeriod, billsView) {
+  const threshold = Math.max(20000, Math.round((payPeriod.expectedPaycheckCents || 0) * 0.2));
+  return billsView.sections.dueBeforePayday
+    .filter((bill) => bill.amountCents >= threshold)
+    .slice(0, 3)
+    .map((bill) => paycheckWatchOut(`bill-before-${bill.id}`, userId, payPeriod.id, "bill_before_payday", "Bill before payday", `${bill.name} is expected before payday.`, "medium", { billId: bill.id, amountCents: bill.amountCents }));
+}
+
+function safeToSpendLowWatchOuts(userId, payPeriod, safe) {
+  const threshold = Number(payPeriod.safeToSpendLowThresholdCents || 5000);
+  if (safe.safeToSpendTotalCents > threshold) return [];
+  return [paycheckWatchOut("safe-to-spend-low", userId, payPeriod.id, "safe_to_spend_low", "Low spending room until payday", "Low spending room until payday.", "medium", { safeToSpendCents: safe.safeToSpendTotalCents, thresholdCents: threshold })];
+}
+
+function duplicateChargeWatchOuts(userId, payPeriod, currentStore = store) {
+  const transactions = Object.values(currentStore.bankTransactions)
+    .filter((item) => item.userId === userId && item.amountCents > 0 && !item.pending)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const watchOuts = [];
+  for (let index = 1; index < transactions.length; index += 1) {
+    const previous = transactions[index - 1];
+    const current = transactions[index];
+    if (normalizeMerchant(previous.merchantName) === normalizeMerchant(current.merchantName) &&
+      Math.abs(previous.amountCents - current.amountCents) <= 100 &&
+      dayDiff(previous.date, current.date) <= 3) {
+      watchOuts.push(paycheckWatchOut(`duplicate-charge-${stableHash(`${current.merchantName}:${current.amountCents}:${previous.date}:${current.date}`)}`, userId, payPeriod.id, "duplicate_charge_suspected", "Possible duplicate charge", "Possible duplicate charge.", "low", { merchantName: current.merchantName, amountCents: current.amountCents, transactionIds: [previous.transactionId || previous.id, current.transactionId || current.id] }));
+    }
+  }
+  return watchOuts;
+}
+
+function subscriptionIncreaseWatchOuts(userId, payPeriod, currentStore = store) {
+  return Object.values(currentStore.subscriptionCandidates)
+    .filter((candidate) => candidate.userId === userId)
+    .filter((candidate) => (candidate.watchOuts || []).includes("Price increased"))
+    .map((candidate) => {
+      const amount = priceIncreaseAmount(candidate, currentStore);
+      return paycheckWatchOut(`subscription-increased-${candidate.id}`, userId, payPeriod.id, "subscription_price_increased", "Subscription price increased", `${candidate.merchantName} increased by ${formatCents(amount)}.`, "low", { candidateId: candidate.id, merchantName: candidate.merchantName, amountDeltaCents: amount });
+    });
+}
+
+function incomePatternChangedWatchOuts(userId, payPeriod, currentStore = store) {
+  const streams = Object.values(currentStore.incomeStreams).filter((item) => item.userId === userId);
+  const strongest = strongestIncomeStream(userId, currentStore);
+  const watchOuts = [];
+  if (strongest && strongest.confidenceScore < 0.7) {
+    watchOuts.push(paycheckWatchOut(`income-pattern-${strongest.id}`, userId, payPeriod.id, "income_pattern_changed", "Paycheck timing may have changed", "Paycheck timing may have changed.", "low", { incomeStreamId: strongest.id }));
+  }
+  const activeSources = new Set(streams.map((stream) => normalizeMerchant(stream.sourceName || stream.payerName)));
+  if (activeSources.size > 1) {
+    watchOuts.push(paycheckWatchOut("income-source-changed", userId, payPeriod.id, "income_pattern_changed", "Paycheck timing may have changed", "Paycheck timing may have changed.", "low", { sources: [...activeSources] }));
+  }
+  return watchOuts;
 }
 
 function buildBillsBeforePaydayView(userId, payPeriod, currentStore = store) {
@@ -1894,6 +2030,52 @@ function sumCents(items) {
   return items.reduce((sum, item) => sum + Number(item.amountCents || 0), 0);
 }
 
+function paycheckWatchOut(key, userId, payPeriodId, type, title, message, severity, metadata = {}) {
+  return {
+    ...watchOut(key, userId, payPeriodId, title, message, severity),
+    type,
+    metadata,
+    status: "active",
+    actions: watchOutActions()
+  };
+}
+
+function watchOutActions() {
+  return [
+    { id: "dismiss", label: "Dismiss" },
+    { id: "edit", label: "Edit" },
+    { id: "correct", label: "Correct" }
+  ];
+}
+
+function strongestIncomeStream(userId, currentStore = store) {
+  return Object.values(currentStore.incomeStreams)
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => b.confidenceScore - a.confidenceScore)[0] || null;
+}
+
+function incomeTransactionsForStream(userId, stream, currentStore = store) {
+  if (!stream) return [];
+  const ids = new Set(stream.transactionsUsed || stream.transactionIds || []);
+  return Object.values(currentStore.bankTransactions)
+    .filter((item) => item.userId === userId && item.amountCents < 0)
+    .filter((item) => ids.has(item.transactionId || item.id) || normalizeIncomeSource(item.merchantName || item.originalDescription) === stream.normalizedSourceName)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function priceIncreaseAmount(candidate, currentStore = store) {
+  const ids = new Set(candidate.transactionsUsed || []);
+  const transactions = Object.values(currentStore.bankTransactions)
+    .filter((item) => ids.has(item.transactionId || item.id))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (transactions.length >= 2) {
+    const latest = transactions.at(-1).amountCents;
+    const previous = transactions.at(-2).amountCents;
+    return Math.max(0, latest - previous);
+  }
+  return Math.max(100, Number(candidate.amountVarianceCents || 0));
+}
+
 function watchOut(key, userId, payPeriodId, title, message, severity) {
   return {
     id: `watch-${stableHash(`${userId}:${payPeriodId}:${key}`)}`,
@@ -1902,6 +2084,8 @@ function watchOut(key, userId, payPeriodId, title, message, severity) {
     title,
     message,
     severity,
+    status: "active",
+    actions: watchOutActions(),
     createdAt: nowIso()
   };
 }
@@ -2431,6 +2615,7 @@ export {
   billsBeforePayday,
   buildBillsBeforePaydayView,
   buildPaycheckCalendar,
+  buildPaycheckWatchOuts,
   buildPayPeriodSetup,
   buildSafeToSpendSnapshot,
   dayDiff,
