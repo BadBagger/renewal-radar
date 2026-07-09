@@ -1,6 +1,8 @@
 package com.renewalradar.app
 
 import com.renewalradar.app.data.SubscriptionDetectionRepository
+import com.renewalradar.app.data.CsvTransactionParser
+import com.renewalradar.app.data.DemoTransactionSeed
 import com.renewalradar.app.data.TransactionSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -83,5 +85,39 @@ class SubscriptionDetectionRepositoryTest {
         val candidates = detector.detectRecurringCandidates(transactions)
 
         assertTrue(candidates.isEmpty())
+    }
+
+    @Test
+    fun `demo seed detects expected staged examples`() {
+        val candidates = detector.detectRecurringCandidates(DemoTransactionSeed.transactions(LocalDate.of(2026, 7, 9)))
+
+        val names = candidates.map { it.merchantName }.toSet()
+        assertTrue("Netflix" in names)
+        assertTrue("Spotify" in names)
+        assertTrue("Adobe" in names)
+        assertTrue("Amazon Prime" in names)
+        assertTrue("Gym Membership" in names)
+        assertTrue("Phone Bill" in names)
+        assertTrue("Electric Utility" in names)
+        assertTrue(candidates.any { it.watchOuts.contains("Duplicate charge suspected") })
+        assertTrue(candidates.any { it.watchOuts.contains("Price increased") })
+        assertTrue(candidates.none { it.merchantName == "Payroll Deposit" })
+    }
+
+    @Test
+    fun `csv import parses common bank export headers`() {
+        val csv = """
+            Date,Description,Amount,Category,Account
+            2026-01-14,Netflix,15.99,Entertainment,Visa 1234
+            2026-02-14,Netflix,15.99,Entertainment,Visa 1234
+            2026-03-14,Netflix,15.99,Entertainment,Visa 1234
+        """.trimIndent()
+
+        val transactions = CsvTransactionParser.parse(csv)
+        val candidates = detector.detectRecurringCandidates(transactions)
+
+        assertEquals(3, transactions.size)
+        assertEquals(1, candidates.size)
+        assertEquals("Netflix", candidates.first().merchantName)
     }
 }

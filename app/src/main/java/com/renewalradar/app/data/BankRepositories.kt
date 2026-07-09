@@ -131,81 +131,32 @@ class BankSyncRepository(
                 )
             )
         )
-        bankDao.upsertCandidates(demoCandidates())
-    }
-
-    private fun demoCandidates(): List<RenewalCandidate> {
-        val today = java.time.LocalDate.now()
-        return listOf(
-            demoCandidate(
-                id = "demo-netflix",
-                merchant = "Netflix",
-                amountCents = 1599,
-                nextChargeDate = today.plusDays(12),
-                lastChargeDate = today.minusDays(18),
-                confidence = 0.94f,
-                reason = "3 recurring monthly card charges with a stable amount."
-            ),
-            demoCandidate(
-                id = "demo-spotify",
-                merchant = "Spotify",
-                amountCents = 1099,
-                nextChargeDate = today.plusDays(6),
-                lastChargeDate = today.minusDays(24),
-                confidence = 0.91f,
-                reason = "3 recurring monthly card charges with a stable amount."
-            ),
-            demoCandidate(
-                id = "demo-electric-utility",
-                merchant = "Electric Utility",
-                amountCents = 12842,
-                nextChargeDate = today.plusDays(9),
-                lastChargeDate = today.minusDays(21),
-                confidence = 0.67f,
-                reason = "Repeated monthly utility payments with a variable amount; marked as bill for review.",
-                candidateType = "bill",
-                amountVarianceCents = 1840
-            )
+        bankDao.upsertCandidates(
+            SubscriptionDetectionRepository().detectRecurringCandidates(DemoTransactionSeed.transactions())
         )
     }
 
-    private fun demoCandidate(
-        id: String,
-        merchant: String,
-        amountCents: Int,
-        nextChargeDate: java.time.LocalDate,
-        lastChargeDate: java.time.LocalDate,
-        confidence: Float,
-        reason: String,
-        candidateType: String = "subscription",
-        amountVarianceCents: Int = 0
-    ): RenewalCandidate =
-        RenewalCandidate(
-            candidateId = id,
-            merchantName = merchant,
-            amountCents = amountCents,
-            averageAmountCents = amountCents,
-            cadence = "Monthly",
-            nextChargeDate = nextChargeDate,
-            lastChargeDate = lastChargeDate,
-            sourceAccountId = BankConnectionRepository.DEMO_ACCOUNT_ID,
-            confidence = confidence,
-            transactionsUsed = 3,
-            accountNickname = "Demo Bank ****0000",
-            category = if (candidateType == "bill") "Utilities" else "Subscription",
-            reasonDetected = reason,
-            candidateType = candidateType,
-            matchingTransactions = listOf(
-                "${lastChargeDate.minusMonths(2)} ${formatCents(amountCents)} $merchant",
-                "${lastChargeDate.minusMonths(1)} ${formatCents(amountCents)} $merchant",
-                "$lastChargeDate ${formatCents(amountCents)} $merchant"
-            ).joinToString("\n"),
-            amountVarianceCents = amountVarianceCents,
-            nextChargeWindowStart = nextChargeDate.minusDays(if (candidateType == "bill") 5 else 2),
-            nextChargeWindowEnd = nextChargeDate.plusDays(if (candidateType == "bill") 5 else 2),
-            watchOuts = if (candidateType == "bill") "Variable bill amount" else "",
-            status = CandidateStatus.Pending
+    suspend fun importTransactions(transactions: List<TransactionSummary>): Int {
+        val syncedAt = System.currentTimeMillis()
+        val accountIds = transactions.map { it.accountId }.distinct().ifEmpty { listOf("csv-import") }
+        bankDao.upsertAccounts(
+            accountIds.map { accountId ->
+                ConnectedAccount(
+                    accountId = accountId,
+                    institutionName = "CSV Import",
+                    accountName = transactions.firstOrNull { it.accountId == accountId }?.accountNickname?.ifBlank { "Imported account" }
+                        ?: "Imported account",
+                    accountMask = "",
+                    accountType = "imported",
+                    status = BankConnectionStatus.Connected,
+                    lastSyncedAtMillis = syncedAt
+                )
+            }
         )
+        val candidates = SubscriptionDetectionRepository().detectRecurringCandidates(transactions)
+        bankDao.upsertCandidates(candidates)
+        return candidates.size
+    }
 }
 
 class SubscriptionDetectionRepository {

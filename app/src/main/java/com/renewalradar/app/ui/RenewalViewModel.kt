@@ -7,6 +7,7 @@ import com.renewalradar.app.data.BankConnectionRepository
 import com.renewalradar.app.data.BankConnectionStatus
 import com.renewalradar.app.data.BankSyncRepository
 import com.renewalradar.app.data.ConnectedAccount
+import com.renewalradar.app.data.CsvTransactionParser
 import com.renewalradar.app.data.PlaidLinkMetadata
 import com.renewalradar.app.data.PlaidPublicToken
 import com.renewalradar.app.data.RenewalCandidate
@@ -117,6 +118,11 @@ class RenewalViewModel(
 
     fun startPlaidLink() {
         viewModelScope.launch {
+            if (!settingsStore.current().mockPremiumBankSyncEnabled) {
+                connectionState.value = BankConnectionStatus.Disconnected
+                bankMessage.value = "Bank sync is staged as a future premium feature. Demo Mode and CSV Import work for free."
+                return@launch
+            }
             connectionState.value = BankConnectionStatus.Connecting
             bankMessage.value = "Requesting a secure Plaid Link token..."
             runCatching {
@@ -131,10 +137,36 @@ class RenewalViewModel(
                 }
             }.onFailure { error ->
                 bankConnectionRepository.clearConnectingPlaceholder()
-                connectLocalDemo(
-                    message = "Backend unavailable. Demo bank data loaded so you can review the flow.",
-                    error = error
-                )
+                connectionState.value = BankConnectionStatus.Disconnected
+                bankMessage.value = error.toBankErrorMessage("Backend unavailable. Use Demo Mode or CSV Import, or configure a hosted HTTPS backend.")
+            }
+        }
+    }
+
+    fun loadDemoData() {
+        viewModelScope.launch {
+            connectLocalDemo("Loading local demo transaction data...")
+        }
+    }
+
+    fun importTransactionsCsv(csvText: String) {
+        viewModelScope.launch {
+            val transactions = CsvTransactionParser.parse(csvText)
+            if (transactions.isEmpty()) {
+                bankMessage.value = "No supported transactions found in that CSV."
+                return@launch
+            }
+            bankSyncInProgress.value = true
+            runCatching {
+                bankSyncRepository.importTransactions(transactions)
+            }.onSuccess { candidateCount ->
+                connectionState.value = BankConnectionStatus.Connected
+                bankMessage.value = "Imported ${transactions.size} transactions. Detected $candidateCount recurring charge candidates for review."
+            }.onFailure { error ->
+                connectionState.value = BankConnectionStatus.SyncFailed
+                bankMessage.value = error.toBankErrorMessage("CSV import failed. Check the file headers and try again.")
+            }.also {
+                bankSyncInProgress.value = false
             }
         }
     }
@@ -358,9 +390,12 @@ private fun RenewalUiState.inferConnectionState(
 private fun Throwable.toBankErrorMessage(fallback: String): String {
     val text = message.orEmpty().lowercase()
     return when {
-        "backend url is not configured" in text -> "Bank backend URL was stale. Restart the app once, then tap Connect bank or card again."
+        "backend url is not configured" in text -> "Production backend is not configured. Demo Mode and CSV Import work without Plaid."
+        "plaid credentials are required" in text || "secret" in text -> "Plaid sandbox secrets are missing on the backend."
+        "link token" in text || "link_token" in text -> "Link token failed. Check the hosted backend Plaid sandbox configuration."
         "bank backend must use https" in text -> "Bank sync backend must use HTTPS. Local HTTP is only for emulator development."
-        "link_token" in text && ("expired" in text || "invalid" in text) -> "Link token expired. Tap Connect bank or card again."
+        "expired" in text || "invalid" in text -> "Link token expired. Tap Connect bank or card again."
+        "offline" in text || "timeout" in text -> "Network offline or backend timed out."
         "network" in text || "unable" in text || "failed" in text -> "Network error or backend unavailable."
         "institution" in text && "failed" in text -> "Institution connection failed. Try again or choose another institution."
         "no supported" in text -> "No supported checking, savings, or credit card accounts were found."

@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: renewal-radar-bank-sync
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PLAID_ENV
+        value: sandbox
+      - key: PLAID_PRODUCTS
+        value: transactions
+      - key: PLAID_COUNTRY_CODES
+        value: US
+      - key: PLAID_ANDROID_PACKAGE_NAME
+        value: com.renewalradar.app
+      - key: PLAID_MOCK_MODE
+        value: true
+      - key: SEED_MOCK_DATA
+        value: true
+      - key: PLAID_CLIENT_ID
+        sync: false
+      - key: PLAID_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: BACKEND_PUBLIC_BASE_URL
+        sync: false

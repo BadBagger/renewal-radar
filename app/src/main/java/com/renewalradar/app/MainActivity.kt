@@ -47,6 +47,19 @@ class MainActivity : ComponentActivity() {
                 val permissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
                 ) {}
+                val csvImportLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.GetContent()
+                ) { uri ->
+                    if (uri != null) {
+                        runCatching {
+                            contentResolver.openInputStream(uri)
+                                ?.bufferedReader()
+                                ?.use { it.readText() }
+                                .orEmpty()
+                        }.onSuccess(viewModel::importTransactionsCsv)
+                            .onFailure { viewModel.importTransactionsCsv("") }
+                    }
+                }
                 val plaidLauncher = rememberLauncherForActivityResult(FastOpenPlaidLink()) { result ->
                     when (result) {
                         is LinkSuccess -> {
@@ -100,6 +113,8 @@ class MainActivity : ComponentActivity() {
                     onDelete = viewModel::delete,
                     onSettingsChange = viewModel::updateSettings,
                     onConnectAccount = viewModel::startPlaidLink,
+                    onLoadDemoData = viewModel::loadDemoData,
+                    onImportCsv = { csvImportLauncher.launch("text/*") },
                     onSyncBankAccounts = viewModel::syncBankAccounts,
                     onDisconnectAccount = viewModel::disconnectAccount,
                     onUpdateCandidate = viewModel::updateCandidate,

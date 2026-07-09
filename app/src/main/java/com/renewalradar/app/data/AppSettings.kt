@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-const val DEFAULT_BANK_BACKEND_URL = "https://satisfactory-offices-proud-boolean.trycloudflare.com"
+const val DEFAULT_BANK_BACKEND_URL = "https://renewal-radar-bank-sync.example.com"
 
 data class RenewalSettings(
     val defaultRenewWindowDays: Int = 70,
@@ -13,7 +13,8 @@ data class RenewalSettings(
     val notificationsEnabled: Boolean = true,
     val darkModeEnabled: Boolean = false,
     val firstLaunchSetupComplete: Boolean = false,
-    val bankBackendUrl: String = DEFAULT_BANK_BACKEND_URL
+    val bankBackendUrl: String = DEFAULT_BANK_BACKEND_URL,
+    val mockPremiumBankSyncEnabled: Boolean = true
 )
 
 class SettingsStore(context: Context) {
@@ -30,6 +31,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_DARK_MODE, settings.darkModeEnabled)
             .putBoolean(KEY_FIRST_LAUNCH_SETUP_COMPLETE, settings.firstLaunchSetupComplete)
             .putString(KEY_BANK_BACKEND_URL, settings.bankBackendUrl)
+            .putBoolean(KEY_MOCK_PREMIUM_BANK_SYNC, settings.mockPremiumBankSyncEnabled)
             .apply()
         state.value = settings
     }
@@ -53,7 +55,8 @@ class SettingsStore(context: Context) {
             notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS, true),
             darkModeEnabled = prefs.getBoolean(KEY_DARK_MODE, false),
             firstLaunchSetupComplete = prefs.getBoolean(KEY_FIRST_LAUNCH_SETUP_COMPLETE, false),
-            bankBackendUrl = migratedBackendUrl
+            bankBackendUrl = migratedBackendUrl,
+            mockPremiumBankSyncEnabled = prefs.getBoolean(KEY_MOCK_PREMIUM_BANK_SYNC, true)
         )
     }
 
@@ -62,7 +65,11 @@ class SettingsStore(context: Context) {
         return normalized.isBlank() ||
             "renewalradar.example" in normalized ||
             "api.example.com" in normalized ||
-            "renewal-radar-bank-sync.loca.lt" in normalized
+            "renewal-radar-bank-sync.loca.lt" in normalized ||
+            "trycloudflare.com" in normalized ||
+            "ngrok" in normalized ||
+            "localhost" in normalized ||
+            "127.0.0.1" in normalized
     }
 
     private companion object {
@@ -72,5 +79,6 @@ class SettingsStore(context: Context) {
         const val KEY_DARK_MODE = "dark_mode_enabled"
         const val KEY_FIRST_LAUNCH_SETUP_COMPLETE = "first_launch_setup_complete"
         const val KEY_BANK_BACKEND_URL = "bank_backend_url"
+        const val KEY_MOCK_PREMIUM_BANK_SYNC = "mock_premium_bank_sync"
     }
 }

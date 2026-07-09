@@ -15,42 +15,42 @@ PLAID_PRODUCTS=transactions
 PLAID_COUNTRY_CODES=US
 PLAID_REDIRECT_URI=
 PLAID_ANDROID_PACKAGE_NAME=com.renewalradar.app
-PLAID_TOKEN_ENCRYPTION_KEY=
+TOKEN_ENCRYPTION_KEY=
 BACKEND_PUBLIC_BASE_URL=https://api.example.com
 PORT=8788
 PLAID_MOCK_MODE=true
 SEED_MOCK_DATA=true
 ```
 
-`PLAID_TOKEN_ENCRYPTION_KEY` should be a 32-byte base64 key. Keep it in a secret
+`TOKEN_ENCRYPTION_KEY` should be a 32-byte base64 key. Keep it in a secret
 manager for production. Do not commit it.
 
 `PLAID_ANDROID_PACKAGE_NAME` must match the Android `applicationId`
 (`com.renewalradar.app`) registered in the Plaid Dashboard.
 
-## Phone-Reachable Backend URL
+## Hosted Backend URL
 
-The Android app default bank sync backend URL for the current dev build is:
+Real users must connect through a hosted HTTPS backend such as Render or
+Railway. Do not ship production builds pointed at localhost, a LAN IP, ngrok,
+Cloudflare quick tunnels, or any desktop server.
 
-```text
-https://satisfactory-offices-proud-boolean.trycloudflare.com
-```
+Android release builds default to the placeholder
+`https://renewal-radar-bank-sync.example.com`. Enter the real hosted HTTPS URL
+in Settings only after `/health` works on the deployed backend.
 
-Start the local backend and HTTPS tunnel from the repo root:
+For local backend development only:
 
 ```powershell
-.\scripts\start-bank-sync-backend.ps1
+cd backend
+npm.cmd test
+npm.cmd run dev
 ```
 
-The script runs the backend on this PC at port `8788`, exposes it through an
-HTTPS Cloudflare quick-tunnel URL, and writes the active URL to
-`bank-backend-url.txt`.
 If `PLAID_CLIENT_ID` and `PLAID_SECRET` are not set, the backend runs in mock
 mode. Mock mode can sync demo recurring charges, but real Plaid Link requires
-valid Plaid sandbox/development/production credentials on the backend.
+valid Plaid sandbox/development/production credentials on the hosted backend.
 
-Cloudflare quick-tunnel URLs are temporary and depend on this PC staying online.
-Use a hosted backend or a named Cloudflare Tunnel for production.
+See `DEPLOYMENT.md` for Render and Railway setup.
 
 ## Security Rules
 
@@ -136,9 +136,9 @@ subscriptions, sync logs, and audit logs.
 
 With `PLAID_MOCK_MODE=true`, the backend does not call Plaid. It returns a mock
 Link token and seeds normalized transaction histories for Netflix, Spotify,
-Adobe, Google, Apple, Amazon Prime, gym membership, phone bill, insurance, and
-utilities. The normal detector turns those imported transactions into
-candidates.
+Adobe, Amazon Prime, gym membership, phone bill, electric utility, duplicate
+charge, and price increase examples. The normal detector turns those imported
+transactions into candidates.
 
 ## Subscription Detection
 

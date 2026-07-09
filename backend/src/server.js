@@ -52,7 +52,12 @@ const server = http.createServer(async (req, res) => {
     const userId = getUserId(req);
 
     if (req.method === "GET" && url.pathname === "/health") {
-      return sendJson(res, 200, { ok: true, mockMode: config.mockMode, plaidEnv: config.plaidEnv });
+      return sendJson(res, 200, {
+        status: "ok",
+        environment: config.plaidEnv,
+        plaidConfigured: Boolean(config.plaidClientId && config.plaidSecret),
+        mockMode: config.mockMode
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/api/plaid/create-link-token") {
@@ -728,11 +733,13 @@ function seedMockTransactions(currentStore, userId, institutionId, accountId) {
     { merchantName: "Adobe", amountCents: 3299, category: "GENERAL_SERVICES", cadenceDays: 30, count: 4 },
     { merchantName: "Google", amountCents: 299, category: "GENERAL_SERVICES", cadenceDays: 30, count: 3 },
     { merchantName: "Apple", amountCents: 999, category: "GENERAL_MERCHANDISE", cadenceDays: 30, count: 3 },
-    { merchantName: "Amazon Prime", amountCents: 1499, category: "GENERAL_MERCHANDISE", cadenceDays: 30, count: 4 },
+    { merchantName: "Amazon Prime", amountCents: 13900, category: "GENERAL_MERCHANDISE", cadenceDays: 365, count: 2 },
     { merchantName: "Gym Membership", amountCents: 2999, category: "GENERAL_SERVICES", cadenceDays: 30, count: 4 },
     { merchantName: "Phone Bill", amountCents: 8499, category: "PHONE", cadenceDays: 30, count: 4, variable: [0, 320, -180, 260] },
     { merchantName: "Insurance", amountCents: 11200, category: "INSURANCE", cadenceDays: 30, count: 4, variable: [0, 0, 210, 210] },
-    { merchantName: "Electric Utility", amountCents: 15640, category: "UTILITIES", cadenceDays: 30, count: 4, variable: [-2200, 1400, 3100, -800] }
+    { merchantName: "Electric Utility", amountCents: 15640, category: "UTILITIES", cadenceDays: 30, count: 4, variable: [-2200, 1400, 3100, -800] },
+    { merchantName: "Cloud Backup", amountCents: 999, category: "GENERAL_SERVICES", cadenceDays: 30, count: 4, variable: [0, 0, 0, 100] },
+    { merchantName: "Video Stream Plus", amountCents: 1499, category: "ENTERTAINMENT", cadenceDays: 30, count: 3 }
   ];
 
   for (const seed of recurringSeeds) {
@@ -761,6 +768,28 @@ function seedMockTransactions(currentStore, userId, institutionId, accountId) {
       };
     }
   }
+
+  const duplicateDate = addDays(today, -28);
+  const duplicateId = `mock-tx-video-stream-plus-duplicate-${accountId}`;
+  currentStore.bankTransactions[duplicateId] = {
+    id: duplicateId,
+    transactionId: duplicateId,
+    userId,
+    institutionId,
+    plaidAccountId: accountId,
+    merchantName: "Video Stream Plus",
+    originalDescription: "Video Stream Plus",
+    amountCents: 1499,
+    currency: "USD",
+    date: addDays(duplicateDate, 2),
+    authorizedDate: duplicateDate,
+    pending: false,
+    category: "ENTERTAINMENT",
+    paymentChannel: "online",
+    logoUrl: null,
+    website: null,
+    createdAt: nowIso()
+  };
 
   const retailSeeds = [
     ["Amazon Marketplace", 4372, 12],
@@ -864,16 +893,16 @@ function decryptToken(value) {
 }
 
 function loadEncryptionKey() {
-  const configured = process.env.PLAID_TOKEN_ENCRYPTION_KEY || "";
+  const configured = process.env.TOKEN_ENCRYPTION_KEY || process.env.PLAID_TOKEN_ENCRYPTION_KEY || "";
   if (configured) {
     const decoded = Buffer.from(configured, "base64");
     if (decoded.length === 32) return decoded;
     const raw = Buffer.from(configured, "utf8");
     if (raw.length === 32) return raw;
-    throw new Error("PLAID_TOKEN_ENCRYPTION_KEY must be 32 bytes or base64-encoded 32 bytes.");
+    throw new Error("TOKEN_ENCRYPTION_KEY must be 32 bytes or base64-encoded 32 bytes.");
   }
   if ((process.env.PLAID_MOCK_MODE || "true").toLowerCase() !== "true") {
-    throw new Error("PLAID_TOKEN_ENCRYPTION_KEY is required outside mock mode.");
+    throw new Error("TOKEN_ENCRYPTION_KEY is required outside mock mode.");
   }
   return crypto.createHash("sha256").update("renewal-radar-local-mock-key").digest();
 }

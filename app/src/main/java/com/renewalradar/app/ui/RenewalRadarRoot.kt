@@ -60,6 +60,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.renewalradar.app.BuildConfig
 import com.renewalradar.app.data.BankConnectionRepository
 import com.renewalradar.app.data.BankConnectionStatus
 import com.renewalradar.app.data.CandidateStatus
@@ -81,6 +82,8 @@ fun RenewalRadarRoot(
     onDelete: (RenewalItem, () -> Unit) -> Unit,
     onSettingsChange: (RenewalSettings) -> Unit,
     onConnectAccount: () -> Unit,
+    onLoadDemoData: () -> Unit,
+    onImportCsv: () -> Unit,
     onSyncBankAccounts: () -> Unit,
     onDisconnectAccount: (ConnectedAccount) -> Unit,
     onUpdateCandidate: (RenewalCandidate) -> Unit,
@@ -156,6 +159,8 @@ fun RenewalRadarRoot(
                 ConnectedAccountsScreen(
                     state = state,
                     onConnectAccount = onConnectAccount,
+                    onLoadDemoData = onLoadDemoData,
+                    onImportCsv = onImportCsv,
                     onSyncBankAccounts = onSyncBankAccounts,
                     onDisconnectAccount = onDisconnectAccount,
                     onOpenCandidates = { navController.navigate("candidates") }
@@ -191,7 +196,8 @@ fun RenewalRadarRoot(
                 SettingsScreen(
                     settings = state.settings,
                     onSettingsChange = onSettingsChange,
-                    onOpenConnectedAccounts = { navController.navigate("accounts") }
+                    onOpenConnectedAccounts = { navController.navigate("accounts") },
+                    bankMessage = state.bankMessage
                 )
             }
         }
@@ -333,6 +339,8 @@ private fun RenewalListScreen(items: List<RenewalItem>, onEdit: (RenewalItem) ->
 private fun ConnectedAccountsScreen(
     state: RenewalUiState,
     onConnectAccount: () -> Unit,
+    onLoadDemoData: () -> Unit,
+    onImportCsv: () -> Unit,
     onSyncBankAccounts: () -> Unit,
     onDisconnectAccount: (ConnectedAccount) -> Unit,
     onOpenCandidates: () -> Unit
@@ -377,6 +385,16 @@ private fun ConnectedAccountsScreen(
                     modifier = Modifier.weight(1f)
                 ) {
                     Text(if (state.bankSyncInProgress) "Syncing" else "Sync now")
+                }
+            }
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextButton(onClick = onLoadDemoData, modifier = Modifier.weight(1f)) {
+                    Text("Load demo data")
+                }
+                TextButton(onClick = onImportCsv, modifier = Modifier.weight(1f)) {
+                    Text("Import CSV")
                 }
             }
         }
@@ -1007,7 +1025,8 @@ private fun NumberField(label: String, value: String, onValueChange: (String) ->
 private fun SettingsScreen(
     settings: RenewalSettings,
     onSettingsChange: (RenewalSettings) -> Unit,
-    onOpenConnectedAccounts: () -> Unit
+    onOpenConnectedAccounts: () -> Unit,
+    bankMessage: String?
 ) {
     var renewWindow by remember(settings.defaultRenewWindowDays) { mutableStateOf(settings.defaultRenewWindowDays.toString()) }
     var attentionWindow by remember(settings.defaultAttentionWindowDays) { mutableStateOf(settings.defaultAttentionWindowDays.toString()) }
@@ -1040,6 +1059,36 @@ private fun SettingsScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Mock premium bank sync")
+                    Text(
+                        "Placeholder gate for Plaid costs. Demo and CSV stay free.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.mockPremiumBankSyncEnabled,
+                    onCheckedChange = { onSettingsChange(settings.copy(mockPremiumBankSyncEnabled = it)) }
+                )
+            }
+        }
+        if (BuildConfig.DEBUG) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Developer Backend Status", style = MaterialTheme.typography.titleMedium)
+                        Text("URL: ${settings.bankBackendUrl.ifBlank { "not configured" }}")
+                        Text(bankMessage ?: "No backend status yet.")
+                    }
+                }
+            }
         }
         item {
             NumberField("Default renew window", renewWindow, {
