@@ -20,7 +20,8 @@ class BackendPlaidApi(
             expirationMillis = json.optString("expiration")
                 .takeIf { it.isNotBlank() }
                 ?.let { Instant.parse(it).toEpochMilli() }
-                ?: (System.currentTimeMillis() + 30 * 60 * 1000)
+                ?: (System.currentTimeMillis() + 30 * 60 * 1000),
+            mockMode = json.optBoolean("mock_mode", false)
         )
     }
 

@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-const val DEFAULT_BANK_BACKEND_URL = "https://api.renewalradar.example"
+const val DEFAULT_BANK_BACKEND_URL = "https://satisfactory-offices-proud-boolean.trycloudflare.com"
 
 data class RenewalSettings(
     val defaultRenewWindowDays: Int = 70,

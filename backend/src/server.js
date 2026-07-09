@@ -117,6 +117,7 @@ async function handleCreateLinkToken(res, userId) {
     audit(userId, "plaid.create_link_token.mock", {});
     return sendJson(res, 200, {
       link_token: `link-sandbox-${crypto.randomUUID()}`,
+      mock_mode: true,
       expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
     });
   }
@@ -135,6 +136,7 @@ async function handleCreateLinkToken(res, userId) {
   audit(userId, "plaid.create_link_token", {});
   return sendJson(res, 200, {
     link_token: response.link_token,
+    mock_mode: false,
     expiration: response.expiration
   });
 }

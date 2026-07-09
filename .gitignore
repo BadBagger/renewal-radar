@@ -13,3 +13,6 @@ captures/
 *.keystore
 backend/.env
 backend/data/*.json
+backend/logs/
+.tools/
+bank-backend-url.txt

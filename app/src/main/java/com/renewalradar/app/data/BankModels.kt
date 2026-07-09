@@ -63,7 +63,8 @@ data class RenewalCandidate(
 
 data class PlaidLinkToken(
     val token: String,
-    val expirationMillis: Long
+    val expirationMillis: Long,
+    val mockMode: Boolean = false
 )
 
 data class PlaidPublicToken(

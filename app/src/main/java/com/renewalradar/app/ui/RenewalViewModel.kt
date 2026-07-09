@@ -123,13 +123,53 @@ class RenewalViewModel(
                 bankConnectionRepository.markConnectingPlaceholder()
                 bankConnectionRepository.createLinkToken()
             }.onSuccess { linkToken ->
-                pendingPlaidLinkToken.value = linkToken.token
-                bankMessage.value = "Opening Plaid Link..."
+                if (linkToken.mockMode) {
+                    connectMockBackend()
+                } else {
+                    pendingPlaidLinkToken.value = linkToken.token
+                    bankMessage.value = "Opening Plaid Link..."
+                }
             }.onFailure { error ->
                 bankConnectionRepository.clearConnectingPlaceholder()
                 connectionState.value = BankConnectionStatus.Disconnected
                 bankMessage.value = error.toBankErrorMessage("Backend unavailable. Try again later.")
             }
+        }
+    }
+
+    private suspend fun connectMockBackend() {
+        connectionState.value = BankConnectionStatus.Connecting
+        bankMessage.value = "Demo bank backend connected. Syncing sample recurring charges..."
+        runCatching {
+            bankConnectionRepository.exchangePublicToken(
+                PlaidPublicToken("public-mock-renewal-radar"),
+                PlaidLinkMetadata(
+                    institution = com.renewalradar.app.data.PlaidInstitutionMetadata(
+                        id = "ins_mock",
+                        name = "Plaid Sandbox Bank"
+                    ),
+                    accounts = listOf(
+                        com.renewalradar.app.data.PlaidAccountMetadata(
+                            id = "mock-checking",
+                            name = "Everyday Checking",
+                            mask = "0000",
+                            type = "depository",
+                            subtype = "checking"
+                        )
+                    )
+                )
+            )
+            bankSyncInProgress.value = true
+            bankSyncRepository.syncNow()
+        }.onSuccess {
+            connectionState.value = BankConnectionStatus.Connected
+            bankMessage.value = "Demo account synced. Review detected recurring charges."
+        }.onFailure { error ->
+            bankSyncRepository.markSyncFailed()
+            connectionState.value = BankConnectionStatus.SyncFailed
+            bankMessage.value = error.toBankErrorMessage("Demo sync failed. Renewal tracking still works.")
+        }.also {
+            bankSyncInProgress.value = false
         }
     }
 

@@ -28,6 +28,30 @@ manager for production. Do not commit it.
 `PLAID_ANDROID_PACKAGE_NAME` must match the Android `applicationId`
 (`com.renewalradar.app`) registered in the Plaid Dashboard.
 
+## Phone-Reachable Backend URL
+
+The Android app default bank sync backend URL for the current dev build is:
+
+```text
+https://satisfactory-offices-proud-boolean.trycloudflare.com
+```
+
+Start the local backend and HTTPS tunnel from the repo root:
+
+```powershell
+.\scripts\start-bank-sync-backend.ps1
+```
+
+The script runs the backend on this PC at port `8788`, exposes it through an
+HTTPS Cloudflare quick-tunnel URL, and writes the active URL to
+`bank-backend-url.txt`.
+If `PLAID_CLIENT_ID` and `PLAID_SECRET` are not set, the backend runs in mock
+mode. Mock mode can sync demo recurring charges, but real Plaid Link requires
+valid Plaid sandbox/development/production credentials on the backend.
+
+Cloudflare quick-tunnel URLs are temporary and depend on this PC staying online.
+Use a hosted backend or a named Cloudflare Tunnel for production.
+
 ## Security Rules
 
 - Android never calls Plaid API endpoints directly except through Plaid Link SDK.
