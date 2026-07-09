@@ -178,6 +178,35 @@ Paycheck Pilot should use the shared Plaid endpoints above for connection,
 sync, account listing, transaction listing, disconnect, export, and delete.
 App-specific paycheck planning data lives under `/api/paycheck`.
 
+Renewal Radar and Paycheck Pilot stay separate apps. Paycheck Pilot can use
+Renewal Radar confirmed recurring charges only after the user turns on the
+Paycheck setting `Use Renewal Radar charges in Paycheck Pilot`. The default is
+off, and Paycheck Pilot continues to work with manual entries and its own bank
+sync when Renewal Radar is not installed, not connected, or not authorized.
+
+### `GET /api/paycheck/sharing-settings`
+
+Returns the user's Paycheck Pilot data-sharing controls and source availability.
+The `settings.useRenewalRadarChargesInPaycheckPilot` flag tells Android whether
+confirmed Renewal Radar subscriptions/bills are included in Paycheck Pilot
+planning.
+
+### `POST /api/paycheck/sharing-settings`
+
+Updates Paycheck Pilot sharing consent. Request body:
+
+```json
+{
+  "useRenewalRadarChargesInPaycheckPilot": true,
+  "shareConnectedAccountsWithPaycheckPilot": true,
+  "sharedAccountIds": ["acct-abc123"]
+}
+```
+
+The backend does not expose Plaid access tokens to either Android app. This
+setting only controls whether safe confirmed charge summaries from Renewal Radar
+are visible to Paycheck Pilot calculations and UI.
+
 ### `GET /api/paycheck/income-streams`
 
 Returns detected recurring income streams, including payer name, average amount,
@@ -237,9 +266,9 @@ or not detected from Plaid transactions.
 ### `GET /api/paycheck/bills-before-payday`
 
 Returns the sectioned "Bills before payday" review screen. Sources include
-manual pay-period bills, Renewal Radar-style confirmed recurring charges,
-user-confirmed subscriptions/utilities/bills, and detected recurring outflows
-from bank sync.
+manual pay-period bills, user-confirmed subscriptions/utilities/bills, detected
+recurring outflows from bank sync, and Renewal Radar confirmed charges only when
+the user has enabled sharing.
 
 Response sections:
 
@@ -249,12 +278,18 @@ Response sections:
 - `ignored`: ignored or excluded bills/subscriptions/candidates.
 
 Each card includes name, expected amount, due/charge date, category, confidence,
-source (`manual`, `bank sync`, or `Renewal Radar`), account/card nickname,
+source (`Manual`, `Bank sync`, or `Renewal Radar`), account/card nickname,
 include/exclude toggle metadata, edit action metadata, and review status. The
 summary includes total due before payday, biggest upcoming charge, days until
 payday, and safe-to-spend impact. Watch-outs call out bills before payday,
 larger charges, possible duplicates, amount increases, and charges that usually
 hit earlier than expected.
+
+The response also includes `sharing` and `upcomingChargesFromRenewalRadar`.
+Android can render the enabled state as "Upcoming charges from Renewal Radar"
+and list items such as Netflix, phone bill, or gym charges with their predicted
+date and amount. When sharing is off, that array is empty and Paycheck Pilot
+should show a calm opt-in path instead of assuming Renewal Radar exists.
 
 Detected bills are never silently confirmed. Android should show `needsReview`
 items with confirm/edit/ignore controls before treating them as user-confirmed.
@@ -265,6 +300,10 @@ Returns a deterministic planning snapshot with current balance, next payday,
 expected paycheck, committed bills, upcoming renewals/subscriptions, buffer,
 planned savings, essentials allowance, total safe-to-spend, daily safe-to-spend,
 confidence, explanation, missing-data guidance, and calm watch-outs.
+
+Confirmed Renewal Radar charges are subtracted from safe-to-spend only when
+`useRenewalRadarChargesInPaycheckPilot` is enabled. Manual bills and Paycheck
+Pilot bank-sync detections remain available either way.
 
 Formula:
 

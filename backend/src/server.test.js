@@ -15,8 +15,18 @@ import {
   detectPaycheckPilotData,
   emptyStore,
   normalizeMerchant,
+  paycheckSharingSettings,
   seedMockData
 } from "./server.js";
+
+function enableRenewalRadarSharing(store, userId = "user-1") {
+  const settings = paycheckSharingSettings(userId, store);
+  store.appDataSharingSettings[settings.id] = {
+    ...settings,
+    useRenewalRadarChargesInPaycheckPilot: true,
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+}
 
 test("normalizes merchants for recurring detection keys", () => {
   assert.equal(normalizeMerchant("  Amazon   Prime "), "amazon prime");
@@ -176,6 +186,7 @@ test("safe-to-spend engine subtracts committed money and explains the estimate",
   const store = emptyStore();
   store.users["user-1"] = { id: "user-1" };
   store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  enableRenewalRadarSharing(store);
   store.confirmedSubscriptions["rent"] = {
     id: "rent",
     userId: "user-1",
@@ -230,10 +241,61 @@ test("safe-to-spend engine subtracts committed money and explains the estimate",
   assert.ok(snapshot.watchOuts.some((item) => item.title.includes("plan is tight")));
 });
 
+test("Paycheck Pilot excludes Renewal Radar charges until sharing is enabled", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  store.confirmedSubscriptions["netflix"] = {
+    id: "netflix",
+    userId: "user-1",
+    merchantName: "Netflix",
+    amountCents: 1599,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-09",
+    sourceAccountId: "acct-1"
+  };
+  const period = {
+    id: "period-sharing",
+    userId: "user-1",
+    startDate: "2026-01-01",
+    nextPayday: "2026-01-15",
+    expectedPaycheckCents: 90000,
+    currentBalanceCents: 150000,
+    safetyBufferCents: 0,
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [{ id: "phone-manual", name: "Phone bill", amountCents: 6000, dueDate: "2026-01-12" }],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: []
+  };
+
+  const defaultView = buildBillsBeforePaydayView("user-1", period, store);
+  const defaultSnapshot = buildSafeToSpendSnapshot("user-1", period, store);
+
+  assert.equal(defaultView.sharing.useRenewalRadarChargesInPaycheckPilot, false);
+  assert.deepEqual(defaultView.upcomingChargesFromRenewalRadar, []);
+  assert.deepEqual(defaultView.sections.dueBeforePayday.map((item) => item.name), ["Phone bill"]);
+  assert.equal(defaultSnapshot.recurringCharges, 0);
+
+  enableRenewalRadarSharing(store);
+  const sharedView = buildBillsBeforePaydayView("user-1", period, store);
+  const sharedSnapshot = buildSafeToSpendSnapshot("user-1", period, store);
+
+  assert.equal(sharedView.sharing.useRenewalRadarChargesInPaycheckPilot, true);
+  assert.deepEqual(sharedView.upcomingChargesFromRenewalRadar.map((item) => item.name), ["Netflix"]);
+  assert.equal(sharedSnapshot.recurringCharges, 1599);
+});
+
 test("safe-to-spend engine supports manual overrides and exclusions", () => {
   const store = emptyStore();
   store.users["user-1"] = { id: "user-1" };
   store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  enableRenewalRadarSharing(store);
   store.confirmedSubscriptions["rent"] = {
     id: "rent",
     userId: "user-1",
@@ -275,6 +337,7 @@ test("bills before payday view sections manual confirmed detected and ignored bi
   store.users["user-1"] = { id: "user-1" };
   store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
   store.connectedAccounts["card-1"] = { id: "card-1", userId: "user-1", plaidAccountId: "card-1", name: "Rewards Card" };
+  enableRenewalRadarSharing(store);
   store.confirmedSubscriptions["rent"] = {
     id: "rent",
     userId: "user-1",
@@ -374,10 +437,11 @@ test("bills before payday view sections manual confirmed detected and ignored bi
   assert.equal(view.title, "Bills before payday");
   assert.deepEqual(view.sections.dueBeforePayday.map((item) => item.name), ["Rent", "Phone bill"]);
   assert.deepEqual(view.sections.dueAfterPayday.map((item) => item.name), ["Internet"]);
-  assert.ok(view.sections.needsReview.some((item) => item.name === "Netflix" && item.source === "bank sync"));
+  assert.ok(view.sections.needsReview.some((item) => item.name === "Netflix" && item.source === "Bank sync"));
   assert.ok(view.sections.needsReview.some((item) => item.name === "Rent" && item.includeToggle.type === "candidate"));
   assert.ok(view.sections.ignored.some((item) => item.name === "Old Gym" && item.included === false));
   assert.ok(view.sections.ignored.some((item) => item.name === "Phone"));
+  assert.ok(view.upcomingChargesFromRenewalRadar.some((item) => item.name === "Rent" && item.source === "Renewal Radar"));
   assert.equal(view.summary.totalDueBeforePayday, 91000);
   assert.equal(view.summary.biggestUpcomingCharge.name, "Rent");
   assert.ok(view.summary.daysUntilPayday >= 0);
@@ -485,6 +549,7 @@ test("paycheck watch-outs detect lower pay missing pay bills duplicates increase
   detectPaycheckPilotData("user-1", store);
   const stream = Object.values(store.incomeStreams)[0];
   stream.confidenceScore = 0.6;
+  enableRenewalRadarSharing(store);
   store.subscriptionCandidates["spotify"] = {
     id: "spotify",
     userId: "user-1",

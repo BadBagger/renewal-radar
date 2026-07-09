@@ -132,6 +132,14 @@ const server = http.createServer(async (req, res) => {
       return handleManualPaycheck(req, res, userId);
     }
 
+    if (req.method === "GET" && url.pathname === "/api/paycheck/sharing-settings") {
+      return handleGetPaycheckSharingSettings(res, userId);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/paycheck/sharing-settings") {
+      return handleUpdatePaycheckSharingSettings(req, res, userId);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/paycheck/bills-before-payday") {
       return handleBillsBeforePayday(res, userId, url);
     }
@@ -546,6 +554,38 @@ function handleSafeToSpend(res, userId, url) {
   return sendJson(res, 200, { snapshot, watchOuts: snapshot.watchOuts, missingData: snapshot.missingData });
 }
 
+function handleGetPaycheckSharingSettings(res, userId) {
+  return sendJson(res, 200, {
+    settings: paycheckSharingSettings(userId, store),
+    availableSources: paycheckSharingAvailableSources(userId, store)
+  });
+}
+
+async function handleUpdatePaycheckSharingSettings(req, res, userId) {
+  const body = await readJson(req);
+  const previous = paycheckSharingSettings(userId, store);
+  const id = previous.id;
+  const settings = {
+    ...previous,
+    useRenewalRadarChargesInPaycheckPilot: Boolean(body.useRenewalRadarChargesInPaycheckPilot),
+    shareConnectedAccountsWithPaycheckPilot: Boolean(body.shareConnectedAccountsWithPaycheckPilot || body.shareConnectedAccounts),
+    sharedAccountIds: normalizeStringList(body.sharedAccountIds || body.accountIds),
+    createdAt: previous.createdAt || nowIso(),
+    updatedAt: nowIso()
+  };
+  store.appDataSharingSettings[id] = settings;
+  audit(userId, "paycheck.sharing_settings.updated", {
+    useRenewalRadarChargesInPaycheckPilot: settings.useRenewalRadarChargesInPaycheckPilot,
+    shareConnectedAccountsWithPaycheckPilot: settings.shareConnectedAccountsWithPaycheckPilot,
+    sharedAccountCount: settings.sharedAccountIds.length
+  });
+  saveStore(store);
+  return sendJson(res, 200, {
+    settings,
+    availableSources: paycheckSharingAvailableSources(userId, store)
+  });
+}
+
 async function handleUpsertPayPeriod(req, res, userId) {
   const body = await readJson(req);
   const id = body.id || `period-${crypto.randomUUID()}`;
@@ -724,6 +764,7 @@ function handleExport(res, userId) {
     billBeforePaydaySnapshots: Object.values(store.billBeforePaydaySnapshots).filter((item) => item.userId === userId),
     safeToSpendSnapshots: Object.values(store.safeToSpendSnapshots).filter((item) => item.userId === userId),
     paycheckWatchOuts: Object.values(store.paycheckWatchOuts).filter((item) => item.userId === userId),
+    appDataSharingSettings: Object.values(store.appDataSharingSettings).filter((item) => item.userId === userId),
     syncLogs: Object.values(store.syncLogs).filter((item) => item.userId === userId)
   });
 }
@@ -745,6 +786,7 @@ function handleDeleteAccount(res, userId) {
     "billBeforePaydaySnapshots",
     "safeToSpendSnapshots",
     "paycheckWatchOuts",
+    "appDataSharingSettings",
     "syncLogs",
     "auditLogs"
   ]) {
@@ -1467,6 +1509,59 @@ function paycheckCalendarWatchOuts(userId, payPeriod, events, currentStore = sto
   return uniqueWatchOuts(watchOuts);
 }
 
+function paycheckSharingSettings(userId, currentStore = store) {
+  const existing = Object.values(currentStore.appDataSharingSettings || {})
+    .find((item) => item.userId === userId && item.consumerApp === "paycheck-pilot");
+  return existing || {
+    id: `paycheck-sharing-${userId}`,
+    userId,
+    consumerApp: "paycheck-pilot",
+    providerApp: "renewal-radar",
+    useRenewalRadarChargesInPaycheckPilot: false,
+    shareConnectedAccountsWithPaycheckPilot: false,
+    sharedAccountIds: [],
+    createdAt: null,
+    updatedAt: null
+  };
+}
+
+function paycheckSharingAvailableSources(userId, currentStore = store) {
+  const settings = paycheckSharingSettings(userId, currentStore);
+  const renewalRadarChargeCount = renewalRadarConfirmedSubscriptionsForPaycheck(userId, currentStore).length;
+  return {
+    manual: true,
+    bankSync: Object.values(currentStore.connectedAccounts).some((item) => item.userId === userId),
+    renewalRadar: {
+      available: renewalRadarChargeCount > 0,
+      enabled: settings.useRenewalRadarChargesInPaycheckPilot,
+      confirmedChargeCount: renewalRadarChargeCount,
+      label: "Renewal Radar",
+      requiresConsent: true
+    }
+  };
+}
+
+function renewalRadarSharingEnabled(userId, currentStore = store) {
+  return Boolean(paycheckSharingSettings(userId, currentStore).useRenewalRadarChargesInPaycheckPilot);
+}
+
+function renewalRadarConfirmedSubscriptionsForPaycheck(userId, currentStore = store) {
+  return Object.values(currentStore.confirmedSubscriptions)
+    .filter((item) => item.userId === userId);
+}
+
+function renewalRadarConfirmedSubscriptionsIfAllowed(userId, currentStore = store) {
+  if (!renewalRadarSharingEnabled(userId, currentStore)) return [];
+  return renewalRadarConfirmedSubscriptionsForPaycheck(userId, currentStore);
+}
+
+function watchOutsForConfirmedSubscription(item, currentStore = store) {
+  if (item.candidateId && currentStore.subscriptionCandidates[item.candidateId]) {
+    return currentStore.subscriptionCandidates[item.candidateId].watchOuts || [];
+  }
+  return [];
+}
+
 function billsBeforePayday(userId, payPeriod, currentStore = store) {
   const excludedCandidates = new Set(payPeriod.excludedCandidateIds || []);
   const excludedAccounts = new Set(payPeriod.excludedAccountIds || []);
@@ -1493,8 +1588,7 @@ function billsBeforePayday(userId, payPeriod, currentStore = store) {
       category: candidate.category || "Detected bill",
       status: "pending"
     }));
-  const confirmedBills = Object.values(currentStore.confirmedSubscriptions)
-    .filter((item) => item.userId === userId)
+  const confirmedBills = renewalRadarConfirmedSubscriptionsIfAllowed(userId, currentStore)
     .filter((item) => !excludedSubscriptions.has(item.id))
     .filter((item) => !excludedAccounts.has(item.sourceAccountId))
     .filter((item) => item.nextChargeDate && item.nextChargeDate <= payPeriod.nextPayday)
@@ -1586,6 +1680,10 @@ function buildSafeToSpendSnapshot(userId, payPeriod, currentStore = store) {
     bills,
     recurringChargeItems: recurringCharges,
     watchOuts,
+    sharing: {
+      useRenewalRadarChargesInPaycheckPilot: renewalRadarSharingEnabled(userId, currentStore),
+      renewalRadarChargeCount: renewalRadarConfirmedSubscriptionsForPaycheck(userId, currentStore).length
+    },
     disclaimer: "Paycheck Pilot is a planning estimate, not financial advice.",
     warning: rawSafeToSpendCents < 0 ? "Your plan is tight before the next paycheck." :
       safeToSpendDailyCents <= 1000 ? "Safe-to-spend is limited each day." : null,
@@ -1728,12 +1826,22 @@ function buildBillsBeforePaydayView(userId, payPeriod, currentStore = store) {
     title: "Bills before payday",
     payPeriod,
     nextPayday: payPeriod.nextPayday,
+    sharing: {
+      useRenewalRadarChargesInPaycheckPilot: renewalRadarSharingEnabled(userId, currentStore),
+      renewalRadarChargeCount: renewalRadarConfirmedSubscriptionsForPaycheck(userId, currentStore).length,
+      message: renewalRadarSharingEnabled(userId, currentStore)
+        ? "Upcoming charges from Renewal Radar are included."
+        : "Renewal Radar charges are off until you turn them on."
+    },
     sections: {
       dueBeforePayday,
       dueAfterPayday,
       needsReview,
       ignored
     },
+    upcomingChargesFromRenewalRadar: allItems
+      .filter((item) => item.source === "Renewal Radar" && item.included && item.reviewStatus === "confirmed")
+      .sort(compareBillCards),
     summary,
     watchOuts: buildBillsBeforePaydayWatchOuts(userId, payPeriod, dueBeforePayday, needsReview, currentStore),
     allItems
@@ -1752,15 +1860,14 @@ function allBillReviewItems(userId, payPeriod, currentStore = store) {
     expectedDate: bill.dueDate || payPeriod.nextPayday,
     category: bill.category || "Manual bill",
     confidenceScore: 1,
-    source: "manual",
+    source: "Manual",
     accountNickname: "Manual entry",
     reviewStatus: "confirmed",
     included: true,
     includeToggle: { type: "manualBill", id: bill.id || `manual-${index}`, included: true },
     canEdit: true
   }));
-  const confirmed = Object.values(currentStore.confirmedSubscriptions)
-    .filter((item) => item.userId === userId)
+  const confirmed = renewalRadarConfirmedSubscriptionsIfAllowed(userId, currentStore)
     .map((item) => {
       const excluded = excludedSubscriptions.has(item.id) || excludedAccounts.has(item.sourceAccountId);
       return billCard({
@@ -1777,7 +1884,8 @@ function allBillReviewItems(userId, payPeriod, currentStore = store) {
         included: !excluded,
         includeToggle: { type: "subscription", id: item.id, included: !excluded },
         canEdit: true,
-        subscriptionId: item.id
+        subscriptionId: item.id,
+        watchOuts: watchOutsForConfirmedSubscription(item, currentStore)
       });
     });
   const detected = Object.values(currentStore.subscriptionCandidates)
@@ -1795,7 +1903,7 @@ function allBillReviewItems(userId, payPeriod, currentStore = store) {
         windowEnd: candidate.nextChargeWindowEnd,
         category: candidate.candidateType === "bill" || likelyBill(candidate) ? "Detected bill" : "Detected subscription",
         confidenceScore: candidate.confidenceScore,
-        source: "bank sync",
+        source: "Bank sync",
         accountNickname: candidate.accountNickname || accountNicknameForAccountId(candidate.accountId, currentStore),
         reviewStatus: ignored ? "ignored" : "pending",
         included: !ignored,
@@ -1908,8 +2016,7 @@ function recurringChargesBeforePayday(userId, payPeriod, currentStore = store) {
   const excludedCandidates = new Set(payPeriod.excludedCandidateIds || []);
   const excludedSubscriptions = new Set(payPeriod.excludedSubscriptionIds || []);
   const excludedAccounts = new Set(payPeriod.excludedAccountIds || []);
-  const confirmed = Object.values(currentStore.confirmedSubscriptions)
-    .filter((item) => item.userId === userId)
+  const confirmed = renewalRadarConfirmedSubscriptionsIfAllowed(userId, currentStore)
     .filter((item) => !excludedSubscriptions.has(item.id))
     .filter((item) => !excludedAccounts.has(item.sourceAccountId))
     .filter((item) => item.nextChargeDate && item.nextChargeDate <= payPeriod.nextPayday)
@@ -2531,6 +2638,7 @@ function emptyStore() {
     billBeforePaydaySnapshots: {},
     safeToSpendSnapshots: {},
     paycheckWatchOuts: {},
+    appDataSharingSettings: {},
     syncLogs: {},
     auditLogs: {}
   };
@@ -2628,5 +2736,6 @@ export {
   betaAccessProblem,
   currentPayPeriod,
   normalizeMerchant,
+  paycheckSharingSettings,
   seedMockData
 };
