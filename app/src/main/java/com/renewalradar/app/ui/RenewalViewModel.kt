@@ -37,6 +37,7 @@ data class RenewalUiState(
     val connectedAccounts: List<ConnectedAccount> = emptyList(),
     val renewalCandidates: List<RenewalCandidate> = emptyList(),
     val settings: RenewalSettings = RenewalSettings(),
+    val appInstallId: String = "",
     val summary: DashboardSummary = DashboardSummary(),
     val bankSyncInProgress: Boolean = false,
     val bankMessage: String? = null,
@@ -49,7 +50,8 @@ class RenewalViewModel(
     private val settingsStore: SettingsStore,
     private val bankConnectionRepository: BankConnectionRepository,
     private val bankSyncRepository: BankSyncRepository,
-    private val renewalCandidateRepository: RenewalCandidateRepository
+    private val renewalCandidateRepository: RenewalCandidateRepository,
+    private val appInstallId: String
 ) : ViewModel() {
     private val bankSyncInProgress = MutableStateFlow(false)
     private val bankMessage = MutableStateFlow<String?>(null)
@@ -74,6 +76,7 @@ class RenewalViewModel(
             connectedAccounts = accounts,
             renewalCandidates = candidates,
             settings = settings,
+            appInstallId = appInstallId,
             summary = DashboardSummary(
                 safe = items.count { it.status(today) == RenewalStatus.Safe },
                 renewSoon = items.count { it.status(today) == RenewalStatus.RenewSoon },
@@ -359,7 +362,8 @@ class RenewalViewModel(
         private val settingsStore: SettingsStore,
         private val bankConnectionRepository: BankConnectionRepository,
         private val bankSyncRepository: BankSyncRepository,
-        private val renewalCandidateRepository: RenewalCandidateRepository
+        private val renewalCandidateRepository: RenewalCandidateRepository,
+        private val appInstallId: String
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -368,7 +372,8 @@ class RenewalViewModel(
                 settingsStore,
                 bankConnectionRepository,
                 bankSyncRepository,
-                renewalCandidateRepository
+                renewalCandidateRepository,
+                appInstallId
             ) as T
         }
     }

@@ -37,7 +37,8 @@ class MainActivity : ComponentActivity() {
                     app.settingsStore,
                     app.bankConnectionRepository,
                     app.bankSyncRepository,
-                    app.renewalCandidateRepository
+                    app.renewalCandidateRepository,
+                    app.appInstallId
                 )
             )
             val state by viewModel.uiState.collectAsState()

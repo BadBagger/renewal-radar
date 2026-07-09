@@ -197,7 +197,8 @@ fun RenewalRadarRoot(
                     settings = state.settings,
                     onSettingsChange = onSettingsChange,
                     onOpenConnectedAccounts = { navController.navigate("accounts") },
-                    bankMessage = state.bankMessage
+                    bankMessage = state.bankMessage,
+                    appInstallId = state.appInstallId
                 )
             }
         }
@@ -1026,7 +1027,8 @@ private fun SettingsScreen(
     settings: RenewalSettings,
     onSettingsChange: (RenewalSettings) -> Unit,
     onOpenConnectedAccounts: () -> Unit,
-    bankMessage: String?
+    bankMessage: String?,
+    appInstallId: String
 ) {
     var renewWindow by remember(settings.defaultRenewWindowDays) { mutableStateOf(settings.defaultRenewWindowDays.toString()) }
     var attentionWindow by remember(settings.defaultAttentionWindowDays) { mutableStateOf(settings.defaultAttentionWindowDays.toString()) }
@@ -1084,6 +1086,7 @@ private fun SettingsScreen(
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Developer Backend Status", style = MaterialTheme.typography.titleMedium)
+                        Text("Beta install ID: ${appInstallId.ifBlank { "not generated yet" }}")
                         Text("URL: ${settings.bankBackendUrl.ifBlank { "not configured" }}")
                         Text(bankMessage ?: "No backend status yet.")
                     }

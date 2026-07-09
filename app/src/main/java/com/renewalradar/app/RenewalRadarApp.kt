@@ -33,14 +33,18 @@ class RenewalRadarApp : Application() {
     lateinit var renewalCandidateRepository: RenewalCandidateRepository
         private set
 
+    lateinit var appInstallId: String
+        private set
+
     override fun onCreate() {
         super.onCreate()
         val database = RenewalDatabase.get(this)
+        appInstallId = AppInstallId.get(this)
         settingsStore = SettingsStore(this)
         val backendApi: PlaidBackendApi = BackendPlaidApi(
             BackendApiConfig(
                 baseUrlProvider = { settingsStore.current().bankBackendUrl },
-                userId = AppInstallId.get(this),
+                userId = appInstallId,
                 allowLocalHttp = false
             )
         )

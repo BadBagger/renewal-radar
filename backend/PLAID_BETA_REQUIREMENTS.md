@@ -36,6 +36,44 @@ Create or configure:
    detection.
 9. Any required Plaid Link customization and privacy/data transparency copy.
 
+## Suggested Plaid Trial Application Answers
+
+Use this as the working copy when Plaid asks what the app does:
+
+```text
+Renewal Radar helps users identify recurring subscriptions, bills, free trials,
+and upcoming renewal charges from read-only transaction data. Users review and
+confirm detected recurring charges before anything becomes a tracked renewal.
+The app alerts users before upcoming charges, price increases, duplicate
+charges, and likely renewal dates. Renewal Radar does not move money, initiate
+payments, provide credit decisions, or store bank login credentials.
+```
+
+Data usage:
+
+```text
+Read-only transaction data is used to normalize merchants, detect recurring
+charges, estimate next charge dates, calculate confidence scores, and show
+review-only subscription or bill candidates. The Android app receives only safe
+summaries and never receives Plaid access tokens.
+```
+
+Security:
+
+```text
+Plaid Link handles credential entry. Android sends only the public_token to a
+hosted HTTPS backend. The backend exchanges it for an access_token, encrypts the
+token at rest, never logs tokens, and never returns tokens to Android. Users can
+disconnect accounts and delete bank-sync data.
+```
+
+Beta scope:
+
+```text
+Initial beta is limited to a small number of users through backend beta caps.
+Manual tracking and CSV import remain available without bank sync.
+```
+
 ## Hosted Backend Requirements
 
 Use Render or Railway. Do not use localhost, LAN IPs, ngrok, Cloudflare quick
@@ -107,11 +145,13 @@ all share the old `local-user` backend identity.
    expected beta slots.
 4. Enter the hosted HTTPS backend URL in Renewal Radar Settings.
 5. Install the beta APK on one test device.
-6. Tap Connected Accounts > Connect bank or card.
-7. Complete Plaid Link.
-8. Sync transactions.
-9. Review Detected renewals.
-10. Confirm that disconnect removes backend access tokens and stops syncing.
+6. In a debug build, open Settings > Developer Backend Status and copy the
+   `Beta install ID` if you are using `BETA_ALLOWED_USER_IDS`.
+7. Tap Connected Accounts > Connect bank or card.
+8. Complete Plaid Link.
+9. Sync transactions.
+10. Review Detected renewals.
+11. Confirm that disconnect removes backend access tokens and stops syncing.
 
 ## What Not To Do
 
