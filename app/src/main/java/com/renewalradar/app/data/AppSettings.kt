@@ -36,15 +36,34 @@ class SettingsStore(context: Context) {
 
     fun current(): RenewalSettings = state.value
 
-    private fun read() = RenewalSettings(
-        defaultRenewWindowDays = prefs.getInt(KEY_RENEW, 70),
-        defaultAttentionWindowDays = prefs.getInt(KEY_ATTENTION, 14),
-        notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS, true),
-        darkModeEnabled = prefs.getBoolean(KEY_DARK_MODE, false),
-        firstLaunchSetupComplete = prefs.getBoolean(KEY_FIRST_LAUNCH_SETUP_COMPLETE, false),
-        bankBackendUrl = prefs.getString(KEY_BANK_BACKEND_URL, DEFAULT_BANK_BACKEND_URL)
+    private fun read(): RenewalSettings {
+        val storedBackendUrl = prefs.getString(KEY_BANK_BACKEND_URL, DEFAULT_BANK_BACKEND_URL)
             ?: DEFAULT_BANK_BACKEND_URL
-    )
+        val migratedBackendUrl = if (storedBackendUrl.isStaleBackendUrl()) {
+            DEFAULT_BANK_BACKEND_URL
+        } else {
+            storedBackendUrl
+        }
+        if (migratedBackendUrl != storedBackendUrl) {
+            prefs.edit().putString(KEY_BANK_BACKEND_URL, migratedBackendUrl).apply()
+        }
+        return RenewalSettings(
+            defaultRenewWindowDays = prefs.getInt(KEY_RENEW, 70),
+            defaultAttentionWindowDays = prefs.getInt(KEY_ATTENTION, 14),
+            notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS, true),
+            darkModeEnabled = prefs.getBoolean(KEY_DARK_MODE, false),
+            firstLaunchSetupComplete = prefs.getBoolean(KEY_FIRST_LAUNCH_SETUP_COMPLETE, false),
+            bankBackendUrl = migratedBackendUrl
+        )
+    }
+
+    private fun String.isStaleBackendUrl(): Boolean {
+        val normalized = trim().lowercase()
+        return normalized.isBlank() ||
+            "renewalradar.example" in normalized ||
+            "api.example.com" in normalized ||
+            "renewal-radar-bank-sync.loca.lt" in normalized
+    }
 
     private companion object {
         const val KEY_RENEW = "default_renew_window_days"

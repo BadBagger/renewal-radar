@@ -131,7 +131,8 @@ class BackendApiConfig(
 
     fun isPlaceholderEndpoint(): Boolean =
         currentBaseUrl().contains("renewalradar.example", ignoreCase = true) ||
-            currentBaseUrl().contains("example.com", ignoreCase = true)
+            currentBaseUrl().contains("example.com", ignoreCase = true) ||
+            currentBaseUrl().contains("renewal-radar-bank-sync.loca.lt", ignoreCase = true)
 }
 
 fun PlaidInstitutionMetadata.toJson(): JSONObject =
