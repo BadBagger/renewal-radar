@@ -466,7 +466,7 @@ function handleSafeToSpend(res, userId, url) {
   const snapshot = buildSafeToSpendSnapshot(userId, current);
   store.safeToSpendSnapshots[snapshot.id] = snapshot;
   saveStore(store);
-  return sendJson(res, 200, { snapshot });
+  return sendJson(res, 200, { snapshot, watchOuts: snapshot.watchOuts, missingData: snapshot.missingData });
 }
 
 async function handleUpsertPayPeriod(req, res, userId) {
@@ -478,8 +478,18 @@ async function handleUpsertPayPeriod(req, res, userId) {
     startDate: body.startDate || todayIso(),
     nextPayday: body.nextPayday,
     expectedPaycheckCents: Number(body.expectedPaycheckCents || body.expectedAmountCents || 0),
-    safetyBufferCents: Number(body.safetyBufferCents || 20000),
-    currentBalanceCents: Number(body.currentBalanceCents || 0),
+    safetyBufferCents: centsFromBody(body, ["safetyBufferCents", "bufferAmountCents"], 20000),
+    currentBalanceCents: centsFromBody(body, ["currentBalanceCents", "currentBalance"], null),
+    savingsGoalCents: centsFromBody(body, ["savingsGoalCents", "plannedSavingsCents", "savingsGoal"], 0),
+    essentialsAllowanceCents: centsFromBody(body, ["essentialsAllowanceCents", "essentialsAllowance"], 0),
+    gasAllowanceCents: centsFromBody(body, ["gasAllowanceCents", "gasAllowance"], 0),
+    groceryAllowanceCents: centsFromBody(body, ["groceryAllowanceCents", "groceryAllowance"], 0),
+    alreadySpentCents: centsFromBody(body, ["alreadySpentCents", "alreadySpent"], 0),
+    manualBills: normalizeManualBills(body.manualBills || body.bills || []),
+    excludedAccountIds: normalizeStringList(body.excludedAccountIds),
+    excludedTransactionIds: normalizeStringList(body.excludedTransactionIds),
+    excludedCandidateIds: normalizeStringList(body.excludedCandidateIds),
+    excludedSubscriptionIds: normalizeStringList(body.excludedSubscriptionIds),
     createdAt: store.payPeriods[id]?.createdAt || nowIso(),
     updatedAt: nowIso()
   };
@@ -1180,6 +1190,16 @@ function currentPayPeriod(userId, asOf = todayIso(), currentStore = store) {
     expectedPaycheckCents: stream?.averageAmountCents || 0,
     safetyBufferCents: 20000,
     currentBalanceCents: estimateCurrentBalanceCents(userId, currentStore),
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: [],
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
@@ -1188,9 +1208,14 @@ function currentPayPeriod(userId, asOf = todayIso(), currentStore = store) {
 }
 
 function billsBeforePayday(userId, payPeriod, currentStore = store) {
-  return Object.values(currentStore.subscriptionCandidates)
+  const excludedCandidates = new Set(payPeriod.excludedCandidateIds || []);
+  const excludedAccounts = new Set(payPeriod.excludedAccountIds || []);
+  const excludedSubscriptions = new Set(payPeriod.excludedSubscriptionIds || []);
+  const detectedBills = Object.values(currentStore.subscriptionCandidates)
     .filter((candidate) => candidate.userId === userId && (candidate.status === "pending" || candidate.status === "new"))
-    .sort((a, b) => a.nextChargeDate.localeCompare(b.nextChargeDate))
+    .filter((candidate) => !excludedCandidates.has(candidate.id))
+    .filter((candidate) => !excludedAccounts.has(candidate.accountId))
+    .sort((a, b) => (a.nextChargeDate || "").localeCompare(b.nextChargeDate || ""))
     .filter((candidate) => !candidate.nextChargeDate || candidate.nextChargeDate <= payPeriod.nextPayday)
     .filter((candidate) => candidate.candidateType === "bill" || likelyBill(candidate))
     .map((candidate) => ({
@@ -1207,50 +1232,253 @@ function billsBeforePayday(userId, payPeriod, currentStore = store) {
       accountNickname: candidate.accountNickname || accountNicknameForAccountId(candidate.accountId, currentStore),
       category: candidate.category || "Detected bill",
       status: "pending"
-    }))
-    .sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+    }));
+  const confirmedBills = Object.values(currentStore.confirmedSubscriptions)
+    .filter((item) => item.userId === userId)
+    .filter((item) => !excludedSubscriptions.has(item.id))
+    .filter((item) => !excludedAccounts.has(item.sourceAccountId))
+    .filter((item) => item.nextChargeDate && item.nextChargeDate <= payPeriod.nextPayday)
+    .filter((item) => likelyBill(item))
+    .map((item) => ({
+      id: `confirmed-bill-${item.id}`,
+      userId,
+      subscriptionId: item.id,
+      merchantName: item.merchantName,
+      amountCents: Number(item.amountCents || 0),
+      expectedDate: item.nextChargeDate,
+      cadence: item.cadence,
+      confidenceScore: 1,
+      accountNickname: accountNicknameForAccountId(item.sourceAccountId, currentStore),
+      category: "Confirmed bill",
+      status: "confirmed"
+    }));
+  return [...confirmedBills, ...detectedBills, ...manualBillsBeforePayday(userId, payPeriod)]
+    .sort((a, b) => (a.expectedDate || "").localeCompare(b.expectedDate || ""));
 }
 
 function buildSafeToSpendSnapshot(userId, payPeriod, currentStore = store) {
   const bills = billsBeforePayday(userId, payPeriod, currentStore);
-  const billsBeforePaydayCents = bills.reduce((sum, bill) => sum + bill.amountCents, 0);
-  const currentBalanceCents = payPeriod.currentBalanceCents || estimateCurrentBalanceCents(userId, currentStore);
-  const safeToSpendCents = Math.max(0, currentBalanceCents - billsBeforePaydayCents - payPeriod.safetyBufferCents);
-  const projectedLeftoverCents = currentBalanceCents - billsBeforePaydayCents;
+  const recurringCharges = recurringChargesBeforePayday(userId, payPeriod, currentStore);
+  const committedBillsCents = sumCents(bills);
+  const recurringChargesCents = sumCents(recurringCharges);
+  const bufferAmountCents = Number(payPeriod.safetyBufferCents || 0);
+  const savingsGoalCents = Number(payPeriod.savingsGoalCents || 0);
+  const essentialsAllowanceCents = Number(payPeriod.essentialsAllowanceCents || 0) +
+    Number(payPeriod.gasAllowanceCents || 0) +
+    Number(payPeriod.groceryAllowanceCents || 0);
+  const alreadySpentCents = Number(payPeriod.alreadySpentCents || 0);
+  const currentBalanceCents = Number.isFinite(Number(payPeriod.currentBalanceCents)) && payPeriod.currentBalanceCents !== null
+    ? Number(payPeriod.currentBalanceCents)
+    : estimateCurrentBalanceCents(userId, currentStore);
+  const expectedIncomeCents = expectedIncomeForPeriod(userId, payPeriod, currentStore);
+  const totalCommittedCents = committedBillsCents + recurringChargesCents + bufferAmountCents + savingsGoalCents + essentialsAllowanceCents + alreadySpentCents;
+  const rawSafeToSpendCents = currentBalanceCents - totalCommittedCents;
+  const safeToSpendCents = Math.max(0, rawSafeToSpendCents);
+  const daysRemaining = Math.max(1, dayDiff(todayIso(), payPeriod.nextPayday));
+  const safeToSpendDailyCents = Math.floor(safeToSpendCents / daysRemaining);
+  const missingData = missingSafeToSpendData(userId, payPeriod, currentStore);
+  const confidenceScore = safeToSpendConfidence(payPeriod, bills, recurringCharges, missingData, currentStore);
+  const explanation = safeToSpendExplanation(safeToSpendCents, safeToSpendDailyCents, payPeriod, bills, recurringCharges, missingData);
+  const watchOuts = buildSafeToSpendWatchOuts(userId, payPeriod, {
+    rawSafeToSpendCents,
+    safeToSpendCents,
+    safeToSpendDailyCents,
+    bills,
+    recurringCharges,
+    expectedIncomeCents,
+    currentBalanceCents,
+    missingData
+  }, currentStore);
   return {
-    id: `safe-${stableHash(`${payPeriod.id}:${billsBeforePaydayCents}:${currentBalanceCents}`)}`,
+    id: `safe-${stableHash(`${payPeriod.id}:${totalCommittedCents}:${currentBalanceCents}:${safeToSpendCents}`)}`,
     userId,
     payPeriodId: payPeriod.id,
+    generatedAt: nowIso(),
     currentBalanceCents,
+    currentBalance: currentBalanceCents,
+    nextPayday: payPeriod.nextPayday,
     expectedPaycheckCents: payPeriod.expectedPaycheckCents,
-    billsBeforePaydayCents,
-    safetyBufferCents: payPeriod.safetyBufferCents,
-    projectedLeftoverCents,
+    expectedIncomeCents,
+    expectedIncome: expectedIncomeCents,
+    committedBillsCents,
+    committedBills: committedBillsCents,
+    recurringChargesCents,
+    recurringCharges: recurringChargesCents,
+    bufferAmountCents,
+    bufferAmount: bufferAmountCents,
+    savingsGoalCents,
+    savingsGoal: savingsGoalCents,
+    essentialsAllowanceCents,
+    essentialsAllowance: essentialsAllowanceCents,
+    alreadySpentCents,
+    totalCommittedCents,
+    billsBeforePaydayCents: committedBillsCents,
+    safetyBufferCents: bufferAmountCents,
+    projectedLeftoverCents: rawSafeToSpendCents,
+    safeToSpendTotalCents: safeToSpendCents,
+    safeToSpendTotal: safeToSpendCents,
     safeToSpendCents,
-    warning: projectedLeftoverCents < 0 ? "You may run short before the next paycheck." :
-      safeToSpendCents <= 5000 ? "Safe-to-spend is low." : null,
+    safeToSpendDailyCents,
+    safeToSpendDaily: safeToSpendDailyCents,
+    confidenceScore,
+    explanation,
+    missingData,
+    bills,
+    recurringChargeItems: recurringCharges,
+    watchOuts,
+    disclaimer: "Paycheck Pilot is a planning estimate, not financial advice.",
+    warning: rawSafeToSpendCents < 0 ? "Your plan is tight before the next paycheck." :
+      safeToSpendDailyCents <= 1000 ? "Safe-to-spend is limited each day." : null,
     createdAt: nowIso()
   };
 }
 
 function buildPaycheckWatchOuts(userId, payPeriod, currentStore = store) {
-  const watchOuts = [];
   const safe = buildSafeToSpendSnapshot(userId, payPeriod, currentStore);
-  if (safe.projectedLeftoverCents < 0) {
-    watchOuts.push(watchOut("negative-leftover", userId, payPeriod.id, "You may run short", "Detected bills before payday are higher than the current balance.", "high"));
-  } else if (safe.safeToSpendCents <= 5000) {
-    watchOuts.push(watchOut("low-safe-to-spend", userId, payPeriod.id, "Safe-to-spend is low", "There is not much room after bills and buffer.", "medium"));
+  return safe.watchOuts;
+}
+
+function manualBillsBeforePayday(userId, payPeriod) {
+  return (payPeriod.manualBills || [])
+    .filter((bill) => !bill.dueDate || bill.dueDate <= payPeriod.nextPayday)
+    .map((bill, index) => ({
+      id: bill.id || `manual-bill-${stableHash(`${payPeriod.id}:${bill.name}:${bill.dueDate || index}:${bill.amountCents}`)}`,
+      userId,
+      merchantName: bill.name || "Manual bill",
+      amountCents: Number(bill.amountCents || 0),
+      expectedDate: bill.dueDate || payPeriod.nextPayday,
+      cadence: bill.cadence || "manual",
+      confidenceScore: 1,
+      accountNickname: "Manual entry",
+      category: bill.category || "Manual bill",
+      status: "manual"
+    }));
+}
+
+function recurringChargesBeforePayday(userId, payPeriod, currentStore = store) {
+  const excludedCandidates = new Set(payPeriod.excludedCandidateIds || []);
+  const excludedSubscriptions = new Set(payPeriod.excludedSubscriptionIds || []);
+  const excludedAccounts = new Set(payPeriod.excludedAccountIds || []);
+  const confirmed = Object.values(currentStore.confirmedSubscriptions)
+    .filter((item) => item.userId === userId)
+    .filter((item) => !excludedSubscriptions.has(item.id))
+    .filter((item) => !excludedAccounts.has(item.sourceAccountId))
+    .filter((item) => item.nextChargeDate && item.nextChargeDate <= payPeriod.nextPayday)
+    .filter((item) => !likelyBill(item))
+    .map((item) => ({
+      id: `confirmed-renewal-${item.id}`,
+      userId,
+      subscriptionId: item.id,
+      merchantName: item.merchantName,
+      amountCents: Number(item.amountCents || 0),
+      expectedDate: item.nextChargeDate,
+      cadence: item.cadence,
+      confidenceScore: 1,
+      accountNickname: accountNicknameForAccountId(item.sourceAccountId, currentStore),
+      category: "Confirmed renewal",
+      status: "confirmed"
+    }));
+  const detected = Object.values(currentStore.subscriptionCandidates)
+    .filter((candidate) => candidate.userId === userId && (candidate.status === "pending" || candidate.status === "new"))
+    .filter((candidate) => !excludedCandidates.has(candidate.id))
+    .filter((candidate) => !excludedAccounts.has(candidate.accountId))
+    .filter((candidate) => !candidate.nextChargeDate || candidate.nextChargeDate <= payPeriod.nextPayday)
+    .filter((candidate) => candidate.candidateType !== "bill" && !likelyBill(candidate))
+    .map((candidate) => ({
+      id: `detected-renewal-${candidate.id}`,
+      userId,
+      candidateId: candidate.id,
+      merchantName: candidate.merchantName,
+      amountCents: Number(candidate.amountCents || candidate.averageAmountCents || 0),
+      expectedDate: candidate.nextChargeDate,
+      windowStart: candidate.nextChargeWindowStart,
+      windowEnd: candidate.nextChargeWindowEnd,
+      cadence: candidate.cadence,
+      confidenceScore: candidate.confidenceScore,
+      accountNickname: candidate.accountNickname || accountNicknameForAccountId(candidate.accountId, currentStore),
+      category: candidate.category || "Detected renewal",
+      status: "pending"
+    }));
+  return [...confirmed, ...detected].sort((a, b) => (a.expectedDate || "").localeCompare(b.expectedDate || ""));
+}
+
+function expectedIncomeForPeriod(userId, payPeriod, currentStore = store) {
+  const confirmed = Object.values(currentStore.confirmedPaychecks)
+    .filter((item) => item.userId === userId)
+    .filter((item) => item.payDate === payPeriod.nextPayday)
+    .sort((a, b) => b.confirmedAt.localeCompare(a.confirmedAt))[0];
+  if (confirmed) return Number(confirmed.amountCents || 0);
+  return Number(payPeriod.expectedPaycheckCents || 0);
+}
+
+function missingSafeToSpendData(userId, payPeriod, currentStore = store) {
+  const missing = [];
+  if (!Number.isFinite(Number(payPeriod.currentBalanceCents)) || payPeriod.currentBalanceCents === null) {
+    missing.push({ field: "currentBalance", message: "Add a current balance or sync an account balance." });
   }
-  for (const bill of billsBeforePayday(userId, payPeriod, currentStore)) {
-    if (bill.windowStart && bill.windowStart < payPeriod.nextPayday && bill.expectedDate >= todayIso()) {
-      watchOuts.push(watchOut(`bill-${bill.id}`, userId, payPeriod.id, `${bill.merchantName} may hit before payday`, `Expected around ${bill.expectedDate} for ${formatCents(bill.amountCents)}.`, "medium"));
+  if (!payPeriod.nextPayday) missing.push({ field: "nextPayday", message: "Set your next payday." });
+  if (!Number(payPeriod.expectedPaycheckCents) && !Object.values(currentStore.incomeStreams).some((item) => item.userId === userId)) {
+    missing.push({ field: "expectedIncome", message: "Confirm an income source or enter an expected paycheck." });
+  }
+  if (!Object.values(currentStore.connectedAccounts).some((account) => account.userId === userId) && !(payPeriod.manualBills || []).length) {
+    missing.push({ field: "bills", message: "Connect an account or add bills manually." });
+  }
+  return missing;
+}
+
+function safeToSpendConfidence(payPeriod, bills, recurringCharges, missingData, currentStore = store) {
+  let score = 0.95;
+  if (missingData.length) score -= missingData.length * 0.18;
+  if (!Number.isFinite(Number(payPeriod.currentBalanceCents)) || payPeriod.currentBalanceCents === null) score -= 0.18;
+  if (!bills.length && !recurringCharges.length) score -= 0.12;
+  const pending = [...bills, ...recurringCharges].filter((item) => item.status === "pending");
+  if (pending.length) score -= Math.min(0.18, pending.length * 0.04);
+  if (!Object.values(currentStore.confirmedPaychecks).some((item) => item.userId === payPeriod.userId)) score -= 0.04;
+  return Math.max(0.2, Math.min(0.98, Number(score.toFixed(2))));
+}
+
+function safeToSpendExplanation(safeToSpendCents, safeToSpendDailyCents, payPeriod, bills, recurringCharges, missingData) {
+  const paydayLabel = payPeriod.nextPayday || "your next payday";
+  const parts = [`You have ${formatCents(safeToSpendCents)} safe to spend until ${paydayLabel}.`];
+  parts.push(`${formatCents(safeToSpendDailyCents)}/day until next payday.`);
+  const upcomingNames = [...bills, ...recurringCharges].slice(0, 2).map((item) => item.merchantName);
+  if (upcomingNames.length) parts.push(`${upcomingNames.join(" and ")} hit before payday.`);
+  if (missingData.length) parts.push(`This estimate is missing ${missingData.map((item) => item.field).join(", ")}.`);
+  parts.push("This is an estimate, not financial advice.");
+  return parts.join(" ");
+}
+
+function buildSafeToSpendWatchOuts(userId, payPeriod, context, currentStore = store) {
+  const watchOuts = [];
+  if (context.rawSafeToSpendCents < 0) {
+    watchOuts.push(watchOut("tight-plan", userId, payPeriod.id, "Your plan is tight", "Committed money is higher than the current available amount.", "high"));
+  } else if (context.safeToSpendDailyCents <= 1000) {
+    watchOuts.push(watchOut("limited-daily", userId, payPeriod.id, "Daily safe-to-spend is limited", `${formatCents(context.safeToSpendDailyCents)}/day until next payday.`, "medium"));
+  }
+  for (const item of [...context.bills, ...context.recurringCharges].slice(0, 4)) {
+    if (item.expectedDate && item.expectedDate >= todayIso()) {
+      watchOuts.push(watchOut(`upcoming-${item.id}`, userId, payPeriod.id, `${item.merchantName} hits before payday`, `Expected around ${item.expectedDate} for ${formatCents(item.amountCents)}.`, "medium"));
     }
   }
   const stream = Object.values(currentStore.incomeStreams).find((item) => item.userId === userId && item.predictedNextPayDate === payPeriod.nextPayday);
   if (stream && stream.confidenceScore < 0.7) {
-    watchOuts.push(watchOut(`income-${stream.id}`, userId, payPeriod.id, "Paycheck timing is uncertain", "Recent deposits do not have a strong cadence yet.", "low"));
+    watchOuts.push(watchOut(`income-${stream.id}`, userId, payPeriod.id, "Paycheck timing is an estimate", "Recent deposits do not have a strong cadence yet.", "low"));
+  }
+  const recentConfirmed = Object.values(currentStore.confirmedPaychecks)
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => b.payDate.localeCompare(a.payDate));
+  const lastConfirmed = recentConfirmed[0];
+  if (lastConfirmed && context.expectedIncomeCents && Number(lastConfirmed.amountCents) < Math.round(context.expectedIncomeCents * 0.85)) {
+    watchOuts.push(watchOut("lower-paycheck", userId, payPeriod.id, "Your next paycheck may be lower than usual", "The most recent confirmed paycheck was below the expected amount.", "medium"));
+  }
+  for (const missing of context.missingData) {
+    watchOuts.push(watchOut(`missing-${missing.field}`, userId, payPeriod.id, "More info would improve this estimate", missing.message, "low"));
   }
   return watchOuts;
+}
+
+function sumCents(items) {
+  return items.reduce((sum, item) => sum + Number(item.amountCents || 0), 0);
 }
 
 function watchOut(key, userId, payPeriodId, title, message, severity) {
@@ -1562,6 +1790,31 @@ async function readJson(req) {
   for await (const chunk of req) chunks.push(chunk);
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function centsFromBody(body, keys, fallback) {
+  for (const key of keys) {
+    if (body[key] !== undefined && body[key] !== null && body[key] !== "") return Number(body[key]);
+  }
+  return fallback;
+}
+
+function normalizeManualBills(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((bill, index) => ({
+    id: bill.id || `manual-${index}`,
+    name: bill.name || bill.merchantName || "Manual bill",
+    amountCents: Number(bill.amountCents || bill.amount || 0),
+    dueDate: bill.dueDate || bill.expectedDate || null,
+    cadence: bill.cadence || bill.repeatType || "manual",
+    category: bill.category || "Manual bill"
+  })).filter((bill) => bill.amountCents > 0);
+}
+
+function normalizeStringList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  return String(value).split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function sendJson(res, status, value) {

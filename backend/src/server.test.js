@@ -168,6 +168,104 @@ test("builds Paycheck Pilot bills before payday and safe-to-spend snapshot", () 
   assert.ok(Number.isFinite(snapshot.safeToSpendCents));
 });
 
+test("safe-to-spend engine subtracts committed money and explains the estimate", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  store.confirmedSubscriptions["rent"] = {
+    id: "rent",
+    userId: "user-1",
+    merchantName: "Rent",
+    amountCents: 85000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-10",
+    sourceAccountId: "acct-1"
+  };
+  store.confirmedSubscriptions["netflix"] = {
+    id: "netflix",
+    userId: "user-1",
+    merchantName: "Netflix",
+    amountCents: 1599,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-09",
+    sourceAccountId: "acct-1"
+  };
+  const period = {
+    id: "period-1",
+    userId: "user-1",
+    startDate: "2026-01-01",
+    nextPayday: "2026-01-15",
+    expectedPaycheckCents: 90000,
+    currentBalanceCents: 150000,
+    safetyBufferCents: 20000,
+    savingsGoalCents: 10000,
+    essentialsAllowanceCents: 12000,
+    gasAllowanceCents: 8000,
+    groceryAllowanceCents: 15000,
+    alreadySpentCents: 5000,
+    manualBills: [{ name: "Phone bill", amountCents: 6000, dueDate: "2026-01-12" }],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: []
+  };
+
+  const snapshot = buildSafeToSpendSnapshot("user-1", period, store);
+
+  assert.equal(snapshot.currentBalance, 150000);
+  assert.equal(snapshot.nextPayday, "2026-01-15");
+  assert.equal(snapshot.expectedIncome, 90000);
+  assert.equal(snapshot.committedBills, 91000);
+  assert.equal(snapshot.recurringCharges, 1599);
+  assert.equal(snapshot.bufferAmount, 20000);
+  assert.equal(snapshot.savingsGoal, 10000);
+  assert.equal(snapshot.essentialsAllowance, 35000);
+  assert.equal(snapshot.safeToSpendTotal, 0);
+  assert.equal(snapshot.safeToSpendDaily, 0);
+  assert.ok(snapshot.explanation.includes("This is an estimate, not financial advice."));
+  assert.ok(snapshot.watchOuts.some((item) => item.title.includes("plan is tight")));
+});
+
+test("safe-to-spend engine supports manual overrides and exclusions", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  store.confirmedSubscriptions["rent"] = {
+    id: "rent",
+    userId: "user-1",
+    merchantName: "Rent",
+    amountCents: 85000,
+    cadence: "Monthly",
+    nextChargeDate: "2026-01-10",
+    sourceAccountId: "acct-1"
+  };
+  const period = {
+    id: "period-2",
+    userId: "user-1",
+    startDate: "2026-01-01",
+    nextPayday: "2026-01-15",
+    expectedPaycheckCents: 90000,
+    currentBalanceCents: 150000,
+    safetyBufferCents: 20000,
+    savingsGoalCents: 0,
+    essentialsAllowanceCents: 0,
+    gasAllowanceCents: 0,
+    groceryAllowanceCents: 0,
+    alreadySpentCents: 0,
+    manualBills: [],
+    excludedAccountIds: [],
+    excludedTransactionIds: [],
+    excludedCandidateIds: [],
+    excludedSubscriptionIds: ["rent"]
+  };
+
+  const snapshot = buildSafeToSpendSnapshot("user-1", period, store);
+
+  assert.equal(snapshot.committedBills, 0);
+  assert.equal(snapshot.safeToSpendTotal, 130000);
+  assert.ok(snapshot.confidenceScore < 0.95);
+});
+
 function tx(id, merchantName, amountCents, date, category = "GENERAL_SERVICES") {
   return {
     id,

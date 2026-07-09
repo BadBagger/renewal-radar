@@ -215,8 +215,30 @@ confidence.
 ### `GET /api/paycheck/safe-to-spend`
 
 Returns a deterministic planning snapshot with current balance, next payday,
-expected paycheck, bills due before payday, projected leftover, safety buffer,
-safe-to-spend amount, and warning state.
+expected paycheck, committed bills, upcoming renewals/subscriptions, buffer,
+planned savings, essentials allowance, total safe-to-spend, daily safe-to-spend,
+confidence, explanation, missing-data guidance, and calm watch-outs.
+
+Formula:
+
+```text
+current available money
+- bills due before next payday
+- upcoming subscriptions/renewals
+- user buffer
+- planned savings
+- essentials allowance
+- already-spent adjustment
+= safe-to-spend amount
+```
+
+The response includes both numeric cent fields and compatibility aliases:
+`currentBalance`, `nextPayday`, `expectedIncome`, `committedBills`,
+`recurringCharges`, `bufferAmount`, `savingsGoal`, `essentialsAllowance`,
+`safeToSpendTotal`, `safeToSpendDaily`, `confidenceScore`, and `explanation`.
+Itemized arrays are returned as `bills`, `recurringChargeItems`, `watchOuts`,
+and `missingData`. The explanation always treats the value as an estimate, not
+financial advice.
 
 ### `POST /api/paycheck/pay-periods`
 
@@ -229,9 +251,25 @@ Request body:
   "nextPayday": "2026-07-15",
   "expectedPaycheckCents": 85000,
   "safetyBufferCents": 20000,
-  "currentBalanceCents": 120000
+  "currentBalanceCents": 120000,
+  "savingsGoalCents": 10000,
+  "essentialsAllowanceCents": 5000,
+  "gasAllowanceCents": 4000,
+  "groceryAllowanceCents": 12000,
+  "alreadySpentCents": 2500,
+  "manualBills": [
+    { "name": "Phone bill", "amountCents": 6500, "dueDate": "2026-07-11" }
+  ],
+  "excludedAccountIds": [],
+  "excludedTransactionIds": [],
+  "excludedCandidateIds": [],
+  "excludedSubscriptionIds": []
 }
 ```
+
+Manual override and exclusion fields let users correct estimates without
+changing bank data. Excluded accounts, detected candidates, and confirmed
+subscriptions are left out of safe-to-spend calculations.
 
 ### `GET /api/paycheck/pay-periods/current`
 
