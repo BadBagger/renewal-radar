@@ -35,15 +35,15 @@ class RenewalRadarApp : Application() {
     override fun onCreate() {
         super.onCreate()
         val database = RenewalDatabase.get(this)
+        settingsStore = SettingsStore(this)
         val backendApi: PlaidBackendApi = BackendPlaidApi(
             BackendApiConfig(
-                baseUrl = "https://api.renewalradar.example",
+                baseUrlProvider = { settingsStore.current().bankBackendUrl },
                 userId = "local-user",
                 allowLocalHttp = false
             )
         )
         repository = RenewalRepository(database.renewalDao())
-        settingsStore = SettingsStore(this)
         bankConnectionRepository = BankConnectionRepository(backendApi, database.bankDao())
         bankSyncRepository = BankSyncRepository(backendApi, database.bankDao())
         subscriptionDetectionRepository = SubscriptionDetectionRepository()

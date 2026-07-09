@@ -65,7 +65,10 @@ class BackendPlaidApi(
     }
 
     private fun request(method: String, path: String, body: JSONObject?): JSONObject {
-        val baseUrl = config.baseUrl.trimEnd('/')
+        val baseUrl = config.currentBaseUrl().trimEnd('/')
+        if (config.isPlaceholderEndpoint()) {
+            throw IOException("Backend URL is not configured. Set a real HTTPS Renewal Radar backend before launching Plaid Link.")
+        }
         val connection = (URL("$baseUrl$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 12_000
@@ -98,12 +101,24 @@ class BackendPlaidApi(
     }
 }
 
-data class BackendApiConfig(
-    val baseUrl: String,
+class BackendApiConfig(
+    private val baseUrlProvider: () -> String,
     val userId: String = "local-user",
     val allowLocalHttp: Boolean = true
 ) {
-    init {
+    constructor(
+        baseUrl: String,
+        userId: String = "local-user",
+        allowLocalHttp: Boolean = true
+    ) : this({ baseUrl }, userId, allowLocalHttp)
+
+    fun currentBaseUrl(): String {
+        val value = baseUrlProvider().trim()
+        validate(value)
+        return value
+    }
+
+    private fun validate(baseUrl: String) {
         val normalized = baseUrl.lowercase()
         val isLocal = normalized.startsWith("http://10.0.2.2") ||
             normalized.startsWith("http://localhost") ||
@@ -112,6 +127,10 @@ data class BackendApiConfig(
             "Bank backend must use HTTPS except local emulator development."
         }
     }
+
+    fun isPlaceholderEndpoint(): Boolean =
+        currentBaseUrl().contains("renewalradar.example", ignoreCase = true) ||
+            currentBaseUrl().contains("example.com", ignoreCase = true)
 }
 
 fun PlaidInstitutionMetadata.toJson(): JSONObject =

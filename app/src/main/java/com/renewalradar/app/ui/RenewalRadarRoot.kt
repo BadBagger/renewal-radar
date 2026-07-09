@@ -206,6 +206,7 @@ fun RenewalRadarRoot(
             onConnectAccounts = {
                 onSettingsChange(state.settings.copy(firstLaunchSetupComplete = true))
                 navController.navigate("accounts") { launchSingleTop = true }
+                onConnectAccount()
             },
             onSkip = {
                 onSettingsChange(state.settings.copy(firstLaunchSetupComplete = true))
@@ -225,8 +226,8 @@ private fun FirstLaunchSetupDialog(
         title = { Text("Set up Renewal Radar") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Add renewals manually now, or connect banks and cards later from Connected Accounts.")
-                Text("Bank sync uses Plaid Link and requires the secure backend. Manual renewal tracking works without it.")
+                Text("Add renewals manually now, or connect a bank or card with Plaid Link.")
+                Text("Bank sync requires the secure backend. Manual renewal tracking works without it.")
             }
         },
         confirmButton = {
@@ -237,7 +238,7 @@ private fun FirstLaunchSetupDialog(
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onConnectAccounts) {
-                    Text("Connected Accounts")
+                    Text("Connect bank/card")
                 }
                 TextButton(onClick = onSkip) {
                     Text("Not now")
@@ -336,6 +337,10 @@ private fun ConnectedAccountsScreen(
     onDisconnectAccount: (ConnectedAccount) -> Unit,
     onOpenCandidates: () -> Unit
 ) {
+    val displayAccounts = state.connectedAccounts.filterNot {
+        it.accountId == BankConnectionRepository.CONNECTING_PLACEHOLDER_ID
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -385,13 +390,13 @@ private fun ConnectedAccountsScreen(
                 Text("Review detected renewals (${state.renewalCandidates.count { it.status == CandidateStatus.Pending }})")
             }
         }
-        if (state.connectedAccounts.isEmpty()) {
+        if (displayAccounts.isEmpty()) {
             item {
                 EmptyState("Not connected. Add a bank or card to start detecting recurring charges.")
             }
         } else {
             items(
-                state.connectedAccounts.filterNot { it.accountId == BankConnectionRepository.CONNECTING_PLACEHOLDER_ID },
+                displayAccounts,
                 key = { it.accountId }
             ) { account ->
                 ConnectedAccountCard(account = account, onDisconnect = { onDisconnectAccount(account) })
@@ -1006,6 +1011,7 @@ private fun SettingsScreen(
 ) {
     var renewWindow by remember(settings.defaultRenewWindowDays) { mutableStateOf(settings.defaultRenewWindowDays.toString()) }
     var attentionWindow by remember(settings.defaultAttentionWindowDays) { mutableStateOf(settings.defaultAttentionWindowDays.toString()) }
+    var bankBackendUrl by remember(settings.bankBackendUrl) { mutableStateOf(settings.bankBackendUrl) }
 
     LazyColumn(
         modifier = Modifier
@@ -1022,6 +1028,18 @@ private fun SettingsScreen(
                 Icon(Icons.Default.CreditCard, contentDescription = null)
                 Text("Connected Accounts")
             }
+        }
+        item {
+            OutlinedTextField(
+                value = bankBackendUrl,
+                onValueChange = {
+                    bankBackendUrl = it
+                    onSettingsChange(settings.copy(bankBackendUrl = it.trim()))
+                },
+                label = { Text("Bank sync backend URL") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
         item {
             NumberField("Default renew window", renewWindow, {

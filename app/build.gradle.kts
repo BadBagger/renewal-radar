@@ -25,8 +25,8 @@ android {
         applicationId = "com.renewalradar.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.6.2-first-launch-setup"
+        versionCode = 10
+        versionName = "1.6.3-plaid-setup-recovery"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -55,6 +55,12 @@ class RenewalViewModel(
     private val pendingPlaidLinkToken = MutableStateFlow<String?>(null)
     private val connectionState = MutableStateFlow(BankConnectionStatus.NotConnected)
 
+    init {
+        viewModelScope.launch {
+            bankConnectionRepository.clearConnectingPlaceholder()
+        }
+    }
+
     private val baseState = combine(
         repository.items,
         settingsStore.settings,
@@ -287,6 +293,8 @@ private fun RenewalUiState.inferConnectionState(
 private fun Throwable.toBankErrorMessage(fallback: String): String {
     val text = message.orEmpty().lowercase()
     return when {
+        "backend url is not configured" in text -> "Bank connection is not configured yet. Add the secure Renewal Radar backend URL before launching Plaid Link."
+        "bank backend must use https" in text -> "Bank sync backend must use HTTPS. Local HTTP is only for emulator development."
         "link_token" in text && ("expired" in text || "invalid" in text) -> "Link token expired. Tap Connect bank or card again."
         "network" in text || "unable" in text || "failed" in text -> "Network error or backend unavailable. Try again later."
         "institution" in text && "failed" in text -> "Institution connection failed. Try again or choose another institution."
