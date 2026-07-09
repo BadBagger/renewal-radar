@@ -131,9 +131,32 @@ class RenewalViewModel(
                 }
             }.onFailure { error ->
                 bankConnectionRepository.clearConnectingPlaceholder()
-                connectionState.value = BankConnectionStatus.Disconnected
-                bankMessage.value = error.toBankErrorMessage("Backend unavailable. Try again later.")
+                connectLocalDemo(
+                    message = "Backend unavailable. Demo bank data loaded so you can review the flow.",
+                    error = error
+                )
             }
+        }
+    }
+
+    private suspend fun connectLocalDemo(message: String, error: Throwable? = null) {
+        connectionState.value = BankConnectionStatus.Connecting
+        bankMessage.value = message
+        runCatching {
+            bankConnectionRepository.connectDemoAccount()
+            bankSyncInProgress.value = true
+            bankSyncRepository.syncDemoCandidates()
+        }.onSuccess {
+            connectionState.value = BankConnectionStatus.Connected
+            bankMessage.value = "Demo account connected. Review detected recurring charges."
+        }.onFailure { localError ->
+            connectionState.value = BankConnectionStatus.SyncFailed
+            bankMessage.value = localError.toBankErrorMessage(
+                error?.toBankErrorMessage("Demo account setup failed. Renewal tracking still works.")
+                    ?: "Demo account setup failed. Renewal tracking still works."
+            )
+        }.also {
+            bankSyncInProgress.value = false
         }
     }
 
@@ -166,8 +189,10 @@ class RenewalViewModel(
             bankMessage.value = "Demo account synced. Review detected recurring charges."
         }.onFailure { error ->
             bankSyncRepository.markSyncFailed()
-            connectionState.value = BankConnectionStatus.SyncFailed
-            bankMessage.value = error.toBankErrorMessage("Demo sync failed. Renewal tracking still works.")
+            connectLocalDemo(
+                message = "Demo backend sync failed. Local demo bank data loaded instead.",
+                error = error
+            )
         }.also {
             bankSyncInProgress.value = false
         }
@@ -336,7 +361,7 @@ private fun Throwable.toBankErrorMessage(fallback: String): String {
         "backend url is not configured" in text -> "Bank backend URL was stale. Restart the app once, then tap Connect bank or card again."
         "bank backend must use https" in text -> "Bank sync backend must use HTTPS. Local HTTP is only for emulator development."
         "link_token" in text && ("expired" in text || "invalid" in text) -> "Link token expired. Tap Connect bank or card again."
-        "network" in text || "unable" in text || "failed" in text -> "Network error or backend unavailable. Try again later."
+        "network" in text || "unable" in text || "failed" in text -> "Network error or backend unavailable."
         "institution" in text && "failed" in text -> "Institution connection failed. Try again or choose another institution."
         "no supported" in text -> "No supported checking, savings, or credit card accounts were found."
         "relink" in text || "permission" in text || "revoked" in text -> "Permission revoked. Reconnect the institution to continue syncing."

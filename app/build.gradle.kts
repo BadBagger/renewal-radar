@@ -25,8 +25,8 @@ android {
         applicationId = "com.renewalradar.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.6.5-backend-url-migration"
+        versionCode = 13
+        versionName = "1.6.6-local-demo-bank"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
