@@ -19,6 +19,7 @@ const config = {
   plaidCountryCodes: splitEnv(process.env.PLAID_COUNTRY_CODES || "US"),
   plaidRedirectUri: process.env.PLAID_REDIRECT_URI || "",
   plaidAndroidPackageName: process.env.PLAID_ANDROID_PACKAGE_NAME || "com.renewalradar.app",
+  paycheckPilotAndroidPackageName: process.env.PAYCHECK_PILOT_ANDROID_PACKAGE_NAME || "com.paycheckpilot",
   mockMode: (process.env.PLAID_MOCK_MODE || "true").toLowerCase() === "true",
   seedMockData: (process.env.SEED_MOCK_DATA || "true").toLowerCase() === "true",
   betaMode: (process.env.BETA_MODE || "false").toLowerCase() === "true",
@@ -39,6 +40,7 @@ const rateBuckets = new Map();
 
 ensureStorage();
 const store = loadStore();
+ensureStoreShape(store);
 if (config.mockMode && config.seedMockData) {
   seedMockData(store, "local-user");
   saveStore(store);
@@ -65,7 +67,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/plaid/create-link-token") {
-      return handleCreateLinkToken(res, userId);
+      return handleCreateLinkToken(req, res, userId);
     }
 
     if (req.method === "POST" && url.pathname === "/api/plaid/exchange-public-token") {
@@ -74,6 +76,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/plaid/sync-transactions") {
       return handleSyncTransactions(req, res, userId);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/accounts") {
+      return handleGetAccounts(res, userId);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/transactions") {
+      return handleGetTransactions(res, userId, url);
     }
 
     if (req.method === "GET" && url.pathname === "/api/renewals/candidates") {
@@ -98,6 +108,42 @@ const server = http.createServer(async (req, res) => {
       return handlePlaidWebhook(req, res);
     }
 
+    if (req.method === "GET" && url.pathname === "/api/paycheck/income-streams") {
+      return handleGetIncomeStreams(res, userId);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/paychecks") {
+      return handleGetPaycheckCandidates(res, userId);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/paycheck/paychecks/confirm") {
+      return handlePaycheckDecision(req, res, userId, "confirmed");
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/paycheck/paychecks/ignore") {
+      return handlePaycheckDecision(req, res, userId, "ignored");
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/bills-before-payday") {
+      return handleBillsBeforePayday(res, userId, url);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/safe-to-spend") {
+      return handleSafeToSpend(res, userId, url);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/paycheck/pay-periods") {
+      return handleUpsertPayPeriod(req, res, userId);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/pay-periods/current") {
+      return handleCurrentPayPeriod(res, userId, url);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/paycheck/watch-outs") {
+      return handlePaycheckWatchOuts(res, userId, url);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/account/export") {
       return handleExport(res, userId);
     }
@@ -119,7 +165,7 @@ if (process.argv[1] === currentFile) {
   });
 }
 
-async function handleCreateLinkToken(res, userId) {
+async function handleCreateLinkToken(req, res, userId) {
   const betaProblem = betaAccessProblem(userId);
   if (betaProblem) return sendJson(res, 403, betaProblem);
   requireUser(store, userId);
@@ -134,13 +180,13 @@ async function handleCreateLinkToken(res, userId) {
   }
 
   const response = await plaidPost("/link/token/create", {
-    client_name: "Renewal Radar",
+    client_name: getClientApp(req) === "paycheck-pilot" ? "Paycheck Pilot" : "Renewal Radar",
     language: "en",
     country_codes: config.plaidCountryCodes,
     user: { client_user_id: userId },
     products: config.plaidProducts,
     webhook: `${config.publicBaseUrl.replace(/\/$/, "")}/api/plaid/webhook`,
-    android_package_name: config.plaidAndroidPackageName,
+    android_package_name: getAndroidPackageName(req),
     ...(config.plaidRedirectUri ? { redirect_uri: config.plaidRedirectUri } : {})
   });
 
@@ -283,11 +329,13 @@ async function syncUserTransactions(userId, institutionId = null) {
     institution.transactionCursor = cursor;
     markAccountsSynced(userId, institution.id);
     detectCandidates(userId);
+    detectPaycheckPilotData(userId);
     audit(userId, "plaid.sync_transactions", { institutionId: institution.id, added, modified, removed });
     addSyncLog(userId, institution.id, "success", syncStarted, nowIso(), "transactions synced");
   }
 
   detectCandidates(userId);
+  detectPaycheckPilotData(userId);
   saveStore(store);
   return {
     status: "ok",
@@ -302,6 +350,19 @@ async function syncUserTransactions(userId, institutionId = null) {
 
 function handleGetCandidates(res, userId) {
   return sendJson(res, 200, { candidates: candidatesForUser(userId) });
+}
+
+function handleGetAccounts(res, userId) {
+  return sendJson(res, 200, { accounts: safeAccounts(userId) });
+}
+
+function handleGetTransactions(res, userId, url) {
+  const limit = Number(url.searchParams.get("limit") || 250);
+  return sendJson(res, 200, {
+    transactions: transactionsForUser(userId)
+      .slice(-Math.max(1, Math.min(limit, 500)))
+      .reverse()
+  });
 }
 
 async function handleCandidateDecision(req, res, userId, candidateId, decision) {
@@ -332,6 +393,114 @@ async function handleCandidateDecision(req, res, userId, candidateId, decision) 
   audit(userId, `candidate.${decision}`, { candidateId });
   saveStore(store);
   return sendJson(res, 200, { status: decision, candidate });
+}
+
+function handleGetIncomeStreams(res, userId) {
+  detectPaycheckPilotData(userId);
+  return sendJson(res, 200, {
+    incomeStreams: Object.values(store.incomeStreams)
+      .filter((stream) => stream.userId === userId)
+      .sort((a, b) => a.predictedNextPayDate.localeCompare(b.predictedNextPayDate))
+  });
+}
+
+function handleGetPaycheckCandidates(res, userId) {
+  detectPaycheckPilotData(userId);
+  return sendJson(res, 200, {
+    paychecks: Object.values(store.paycheckCandidates)
+      .filter((candidate) => candidate.userId === userId && candidate.status === "pending")
+      .sort((a, b) => a.predictedPayDate.localeCompare(b.predictedPayDate))
+  });
+}
+
+async function handlePaycheckDecision(req, res, userId, decision) {
+  const body = await readJson(req).catch(() => ({}));
+  const paycheckId = body.candidateId || body.paycheckId || body.id;
+  const candidate = store.paycheckCandidates[paycheckId];
+  if (!candidate || candidate.userId !== userId) {
+    return sendJson(res, 404, { error: "paycheck_candidate_not_found" });
+  }
+  candidate.status = decision;
+  candidate.updatedAt = nowIso();
+  if (decision === "confirmed") {
+    const confirmedId = `confirmed-pay-${crypto.randomUUID()}`;
+    store.confirmedPaychecks[confirmedId] = {
+      id: confirmedId,
+      userId,
+      paycheckCandidateId: candidate.id,
+      incomeStreamId: candidate.incomeStreamId,
+      payerName: body.payerName || candidate.payerName,
+      amountCents: Number(body.actualAmountCents || body.amountCents || candidate.expectedAmountCents),
+      payDate: body.payDate || candidate.predictedPayDate,
+      actualTransactionId: body.actualTransactionId || null,
+      notes: body.notes || "",
+      confirmedAt: nowIso()
+    };
+  }
+  audit(userId, `paycheck.${decision}`, { paycheckId });
+  saveStore(store);
+  return sendJson(res, 200, { status: decision, paycheck: candidate });
+}
+
+function handleBillsBeforePayday(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
+  const bills = billsBeforePayday(userId, current);
+  const snapshotId = `bbp-${userId}-${current.startDate}-${current.nextPayday}`;
+  store.billBeforePaydaySnapshots[snapshotId] = {
+    id: snapshotId,
+    userId,
+    payPeriodId: current.id,
+    nextPayday: current.nextPayday,
+    billIds: bills.map((bill) => bill.id),
+    totalCents: bills.reduce((sum, bill) => sum + bill.amountCents, 0),
+    createdAt: nowIso()
+  };
+  saveStore(store);
+  return sendJson(res, 200, { payPeriod: current, bills, totalCents: store.billBeforePaydaySnapshots[snapshotId].totalCents });
+}
+
+function handleSafeToSpend(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
+  const snapshot = buildSafeToSpendSnapshot(userId, current);
+  store.safeToSpendSnapshots[snapshot.id] = snapshot;
+  saveStore(store);
+  return sendJson(res, 200, { snapshot });
+}
+
+async function handleUpsertPayPeriod(req, res, userId) {
+  const body = await readJson(req);
+  const id = body.id || `period-${crypto.randomUUID()}`;
+  const payPeriod = {
+    id,
+    userId,
+    startDate: body.startDate || todayIso(),
+    nextPayday: body.nextPayday,
+    expectedPaycheckCents: Number(body.expectedPaycheckCents || body.expectedAmountCents || 0),
+    safetyBufferCents: Number(body.safetyBufferCents || 20000),
+    currentBalanceCents: Number(body.currentBalanceCents || 0),
+    createdAt: store.payPeriods[id]?.createdAt || nowIso(),
+    updatedAt: nowIso()
+  };
+  if (!payPeriod.nextPayday) return sendJson(res, 400, { error: "nextPayday_required" });
+  store.payPeriods[id] = payPeriod;
+  saveStore(store);
+  return sendJson(res, 200, { payPeriod });
+}
+
+function handleCurrentPayPeriod(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  return sendJson(res, 200, { payPeriod: currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso()) });
+}
+
+function handlePaycheckWatchOuts(res, userId, url) {
+  detectPaycheckPilotData(userId);
+  const current = currentPayPeriod(userId, url.searchParams.get("asOf") || todayIso());
+  const watchOuts = buildPaycheckWatchOuts(userId, current);
+  for (const item of watchOuts) store.paycheckWatchOuts[item.id] = item;
+  saveStore(store);
+  return sendJson(res, 200, { watchOuts });
 }
 
 async function handleDisconnect(req, res, userId) {
@@ -401,6 +570,14 @@ function handleExport(res, userId) {
     recurringStreams: Object.values(store.recurringStreams).filter((item) => item.userId === userId),
     subscriptionCandidates: Object.values(store.subscriptionCandidates).filter((item) => item.userId === userId),
     confirmedSubscriptions: Object.values(store.confirmedSubscriptions).filter((item) => item.userId === userId),
+    renewalWatchOuts: Object.values(store.renewalWatchOuts).filter((item) => item.userId === userId),
+    incomeStreams: Object.values(store.incomeStreams).filter((item) => item.userId === userId),
+    paycheckCandidates: Object.values(store.paycheckCandidates).filter((item) => item.userId === userId),
+    confirmedPaychecks: Object.values(store.confirmedPaychecks).filter((item) => item.userId === userId),
+    payPeriods: Object.values(store.payPeriods).filter((item) => item.userId === userId),
+    billBeforePaydaySnapshots: Object.values(store.billBeforePaydaySnapshots).filter((item) => item.userId === userId),
+    safeToSpendSnapshots: Object.values(store.safeToSpendSnapshots).filter((item) => item.userId === userId),
+    paycheckWatchOuts: Object.values(store.paycheckWatchOuts).filter((item) => item.userId === userId),
     syncLogs: Object.values(store.syncLogs).filter((item) => item.userId === userId)
   });
 }
@@ -414,6 +591,14 @@ function handleDeleteAccount(res, userId) {
     "recurringStreams",
     "subscriptionCandidates",
     "confirmedSubscriptions",
+    "renewalWatchOuts",
+    "incomeStreams",
+    "paycheckCandidates",
+    "confirmedPaychecks",
+    "payPeriods",
+    "billBeforePaydaySnapshots",
+    "safeToSpendSnapshots",
+    "paycheckWatchOuts",
     "syncLogs",
     "auditLogs"
   ]) {
@@ -807,7 +992,10 @@ function seedMockTransactions(currentStore, userId, institutionId, accountId) {
     ["Target", 6421, 20],
     ["Grocery Store", 8120, 4],
     ["Coffee Shop", 525, 2],
-    ["Payroll Deposit", -85000, 14]
+    ["Payroll Deposit", -85000, 14],
+    ["Payroll Deposit", -85000, 28],
+    ["Payroll Deposit", -85000, 42],
+    ["Payroll Deposit", -85000, 56]
   ];
   for (const [merchantName, amountCents, daysAgo] of retailSeeds) {
     const date = addDays(today, -daysAgo);
@@ -843,19 +1031,245 @@ function requireUser(currentStore, userId) {
   return currentStore.users[userId];
 }
 
-function safeAccounts(userId) {
-  return Object.values(store.connectedAccounts)
+function safeAccounts(userId, currentStore = store) {
+  return Object.values(currentStore.connectedAccounts)
     .filter((account) => account.userId === userId)
     .map(({ plaidAccountId, ...safe }) => ({
       ...safe,
-      institutionName: store.connectedInstitutions[safe.institutionId]?.institutionName || "Connected institution"
+      institutionName: currentStore.connectedInstitutions[safe.institutionId]?.institutionName || "Connected institution"
     }));
 }
 
-function candidatesForUser(userId) {
-  return Object.values(store.subscriptionCandidates)
+function candidatesForUser(userId, currentStore = store) {
+  return Object.values(currentStore.subscriptionCandidates)
     .filter((candidate) => candidate.userId === userId && (candidate.status === "pending" || candidate.status === "new"))
-    .sort((a, b) => a.nextChargeDate.localeCompare(b.nextChargeDate));
+    .sort((a, b) => (a.nextChargeDate || "").localeCompare(b.nextChargeDate || ""));
+}
+
+function transactionsForUser(userId, currentStore = store) {
+  return Object.values(currentStore.bankTransactions)
+    .filter((transaction) => transaction.userId === userId)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(({ institutionId, ...safe }) => ({
+      ...safe,
+      accountNickname: accountNicknameForPlaidAccount(userId, safe.plaidAccountId, currentStore)
+    }));
+}
+
+function detectPaycheckPilotData(userId, currentStore = store) {
+  ensureStoreShape(currentStore);
+  detectCandidates(userId, currentStore);
+  const transactions = Object.values(currentStore.bankTransactions)
+    .filter((transaction) => transaction.userId === userId && !transaction.pending)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  detectIncomeStreams(userId, transactions, currentStore);
+  detectPaycheckCandidates(userId, currentStore);
+  detectBillBeforePaydayCandidates(userId, currentStore);
+}
+
+function detectIncomeStreams(userId, transactions, currentStore = store) {
+  const income = transactions.filter(isIncomeTransaction);
+  const groups = groupBy(income, (transaction) => `${transaction.plaidAccountId}:${normalizeMerchant(transaction.merchantName || transaction.originalDescription)}`);
+  for (const group of groups.values()) {
+    if (group.length < 1) continue;
+    const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
+    const gaps = sorted.slice(1).map((transaction, index) => dayDiff(sorted[index].date, transaction.date));
+    const cadence = classifyCadence(sorted, gaps) || (sorted.length >= 2 ? "Recurring" : "Unknown");
+    const latest = sorted.at(-1);
+    const averageGap = gaps.length ? gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length : 14;
+    const averageAmountCents = Math.round(sorted.reduce((sum, transaction) => sum + Math.abs(transaction.amountCents), 0) / sorted.length);
+    const id = `income-${stableHash(`${latest.plaidAccountId}:${normalizeMerchant(latest.merchantName)}:${averageAmountCents}`)}`;
+    const predictedNextPayDate = addDays(latest.date, predictedGapDays(cadence, averageGap));
+    currentStore.incomeStreams[id] = {
+      id,
+      userId,
+      accountId: accountIdForPlaidAccount(userId, latest.plaidAccountId, currentStore),
+      payerName: latest.merchantName || latest.originalDescription || "Paycheck",
+      cadence,
+      averageAmountCents,
+      lastPayDate: latest.date,
+      predictedNextPayDate,
+      transactionIds: sorted.map((transaction) => transaction.transactionId || transaction.id),
+      confidenceScore: sorted.length >= 3 && cadence !== "Unknown" ? 0.9 : sorted.length >= 2 ? 0.74 : 0.5,
+      updatedAt: nowIso()
+    };
+  }
+}
+
+function detectPaycheckCandidates(userId, currentStore = store) {
+  for (const stream of Object.values(currentStore.incomeStreams).filter((item) => item.userId === userId)) {
+    const id = `paycheck-${stableHash(`${stream.id}:${stream.predictedNextPayDate}`)}`;
+    const existing = currentStore.paycheckCandidates[id];
+    if (existing && ["confirmed", "ignored"].includes(existing.status)) continue;
+    currentStore.paycheckCandidates[id] = {
+      id,
+      userId,
+      incomeStreamId: stream.id,
+      payerName: stream.payerName,
+      expectedAmountCents: stream.averageAmountCents,
+      predictedPayDate: stream.predictedNextPayDate,
+      cadence: stream.cadence,
+      confidenceScore: stream.confidenceScore,
+      accountNickname: accountNicknameForAccountId(stream.accountId, currentStore),
+      status: "pending",
+      createdAt: existing?.createdAt || nowIso(),
+      updatedAt: nowIso()
+    };
+  }
+}
+
+function detectBillBeforePaydayCandidates(userId, currentStore = store) {
+  const pendingBills = candidatesForUser(userId, currentStore)
+    .filter((candidate) => candidate.candidateType === "bill" || likelyBill(candidate));
+  for (const bill of pendingBills) {
+    const id = `bill-before-${stableHash(`${bill.id}:${bill.nextChargeDate}`)}`;
+    currentStore.billBeforePaydaySnapshots[id] ||= {
+      id,
+      userId,
+      payPeriodId: null,
+      nextPayday: null,
+      billIds: [],
+      totalCents: 0,
+      createdAt: nowIso()
+    };
+  }
+}
+
+function currentPayPeriod(userId, asOf = todayIso(), currentStore = store) {
+  const existing = Object.values(currentStore.payPeriods)
+    .filter((period) => period.userId === userId && period.startDate <= asOf && period.nextPayday >= asOf)
+    .sort((a, b) => a.nextPayday.localeCompare(b.nextPayday))[0];
+  if (existing) return existing;
+  const stream = Object.values(currentStore.incomeStreams)
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => a.predictedNextPayDate.localeCompare(b.predictedNextPayDate))[0];
+  const lastPayDate = stream?.lastPayDate || addDays(asOf, -14);
+  const nextPayday = stream?.predictedNextPayDate || addDays(asOf, 14);
+  const period = {
+    id: `period-${stableHash(`${userId}:${lastPayDate}:${nextPayday}`)}`,
+    userId,
+    startDate: lastPayDate,
+    nextPayday,
+    expectedPaycheckCents: stream?.averageAmountCents || 0,
+    safetyBufferCents: 20000,
+    currentBalanceCents: estimateCurrentBalanceCents(userId, currentStore),
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  currentStore.payPeriods[period.id] = period;
+  return period;
+}
+
+function billsBeforePayday(userId, payPeriod, currentStore = store) {
+  return Object.values(currentStore.subscriptionCandidates)
+    .filter((candidate) => candidate.userId === userId && (candidate.status === "pending" || candidate.status === "new"))
+    .sort((a, b) => a.nextChargeDate.localeCompare(b.nextChargeDate))
+    .filter((candidate) => !candidate.nextChargeDate || candidate.nextChargeDate <= payPeriod.nextPayday)
+    .filter((candidate) => candidate.candidateType === "bill" || likelyBill(candidate))
+    .map((candidate) => ({
+      id: `bill-${candidate.id}`,
+      userId,
+      candidateId: candidate.id,
+      merchantName: candidate.merchantName,
+      amountCents: candidate.amountCents || candidate.averageAmountCents,
+      expectedDate: candidate.nextChargeDate,
+      windowStart: candidate.nextChargeWindowStart,
+      windowEnd: candidate.nextChargeWindowEnd,
+      cadence: candidate.cadence,
+      confidenceScore: candidate.confidenceScore,
+      accountNickname: candidate.accountNickname || accountNicknameForAccountId(candidate.accountId, currentStore),
+      category: candidate.category || "Detected bill",
+      status: "pending"
+    }))
+    .sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+}
+
+function buildSafeToSpendSnapshot(userId, payPeriod, currentStore = store) {
+  const bills = billsBeforePayday(userId, payPeriod, currentStore);
+  const billsBeforePaydayCents = bills.reduce((sum, bill) => sum + bill.amountCents, 0);
+  const currentBalanceCents = payPeriod.currentBalanceCents || estimateCurrentBalanceCents(userId, currentStore);
+  const safeToSpendCents = Math.max(0, currentBalanceCents - billsBeforePaydayCents - payPeriod.safetyBufferCents);
+  const projectedLeftoverCents = currentBalanceCents - billsBeforePaydayCents;
+  return {
+    id: `safe-${stableHash(`${payPeriod.id}:${billsBeforePaydayCents}:${currentBalanceCents}`)}`,
+    userId,
+    payPeriodId: payPeriod.id,
+    currentBalanceCents,
+    expectedPaycheckCents: payPeriod.expectedPaycheckCents,
+    billsBeforePaydayCents,
+    safetyBufferCents: payPeriod.safetyBufferCents,
+    projectedLeftoverCents,
+    safeToSpendCents,
+    warning: projectedLeftoverCents < 0 ? "You may run short before the next paycheck." :
+      safeToSpendCents <= 5000 ? "Safe-to-spend is low." : null,
+    createdAt: nowIso()
+  };
+}
+
+function buildPaycheckWatchOuts(userId, payPeriod, currentStore = store) {
+  const watchOuts = [];
+  const safe = buildSafeToSpendSnapshot(userId, payPeriod, currentStore);
+  if (safe.projectedLeftoverCents < 0) {
+    watchOuts.push(watchOut("negative-leftover", userId, payPeriod.id, "You may run short", "Detected bills before payday are higher than the current balance.", "high"));
+  } else if (safe.safeToSpendCents <= 5000) {
+    watchOuts.push(watchOut("low-safe-to-spend", userId, payPeriod.id, "Safe-to-spend is low", "There is not much room after bills and buffer.", "medium"));
+  }
+  for (const bill of billsBeforePayday(userId, payPeriod, currentStore)) {
+    if (bill.windowStart && bill.windowStart < payPeriod.nextPayday && bill.expectedDate >= todayIso()) {
+      watchOuts.push(watchOut(`bill-${bill.id}`, userId, payPeriod.id, `${bill.merchantName} may hit before payday`, `Expected around ${bill.expectedDate} for ${formatCents(bill.amountCents)}.`, "medium"));
+    }
+  }
+  const stream = Object.values(currentStore.incomeStreams).find((item) => item.userId === userId && item.predictedNextPayDate === payPeriod.nextPayday);
+  if (stream && stream.confidenceScore < 0.7) {
+    watchOuts.push(watchOut(`income-${stream.id}`, userId, payPeriod.id, "Paycheck timing is uncertain", "Recent deposits do not have a strong cadence yet.", "low"));
+  }
+  return watchOuts;
+}
+
+function watchOut(key, userId, payPeriodId, title, message, severity) {
+  return {
+    id: `watch-${stableHash(`${userId}:${payPeriodId}:${key}`)}`,
+    userId,
+    payPeriodId,
+    title,
+    message,
+    severity,
+    createdAt: nowIso()
+  };
+}
+
+function isIncomeTransaction(transaction) {
+  const text = `${transaction.merchantName} ${transaction.originalDescription || ""} ${transaction.category || ""}`.toLowerCase();
+  return transaction.amountCents < 0 || ["payroll", "paycheck", "salary", "income", "direct deposit", "deposit"].some((term) => text.includes(term));
+}
+
+function likelyBill(candidate) {
+  const text = `${candidate.merchantName} ${candidate.category || ""}`.toLowerCase();
+  return ["rent", "utility", "electric", "water", "gas", "phone", "wireless", "insurance", "internet", "telecom"].some((term) => text.includes(term));
+}
+
+function estimateCurrentBalanceCents(userId, currentStore = store) {
+  const recent = Object.values(currentStore.bankTransactions)
+    .filter((transaction) => transaction.userId === userId)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-120);
+  return 125000 - recent.reduce((sum, transaction) => sum + transaction.amountCents, 0);
+}
+
+function accountIdForPlaidAccount(userId, plaidAccountId, currentStore = store) {
+  return Object.values(currentStore.connectedAccounts)
+    .find((account) => account.userId === userId && (account.plaidAccountId === plaidAccountId || account.id === plaidAccountId))
+    ?.id || plaidAccountId;
+}
+
+function accountNicknameForPlaidAccount(userId, plaidAccountId, currentStore = store) {
+  const account = Object.values(currentStore.connectedAccounts)
+    .find((item) => item.userId === userId && (item.plaidAccountId === plaidAccountId || item.id === plaidAccountId));
+  return account?.name || "Connected account";
+}
+
+function accountNicknameForAccountId(accountId, currentStore = store) {
+  return currentStore.connectedAccounts[accountId]?.name || "Connected account";
 }
 
 function markAccountsSynced(userId, institutionId) {
@@ -939,8 +1353,20 @@ function isHttpsRequest(req) {
 }
 
 function getUserId(req) {
-  const value = req.headers["x-renewal-user-id"];
+  const value = req.headers["x-renewal-user-id"] || req.headers["x-paycheck-pilot-user-id"] || req.headers["x-paycheckpilot-user-id"];
   return typeof value === "string" && value.trim() ? value.trim() : "local-user";
+}
+
+function getClientApp(req) {
+  const value = req.headers["x-client-app"] || req.headers["x-smithware-app"];
+  if (typeof value !== "string") return "renewal-radar";
+  return value.trim().toLowerCase();
+}
+
+function getAndroidPackageName(req) {
+  return getClientApp(req) === "paycheck-pilot"
+    ? config.paycheckPilotAndroidPackageName
+    : config.plaidAndroidPackageName;
 }
 
 function betaStatus(currentStore = store) {
@@ -1000,7 +1426,9 @@ function ensureStorage() {
 }
 
 function loadStore() {
-  return JSON.parse(fs.readFileSync(storePath, "utf8"));
+  const loaded = JSON.parse(fs.readFileSync(storePath, "utf8"));
+  ensureStoreShape(loaded);
+  return loaded;
 }
 
 function saveStore(value) {
@@ -1016,9 +1444,25 @@ function emptyStore() {
     recurringStreams: {},
     subscriptionCandidates: {},
     confirmedSubscriptions: {},
+    renewalWatchOuts: {},
+    incomeStreams: {},
+    paycheckCandidates: {},
+    confirmedPaychecks: {},
+    payPeriods: {},
+    billBeforePaydaySnapshots: {},
+    safeToSpendSnapshots: {},
+    paycheckWatchOuts: {},
     syncLogs: {},
     auditLogs: {}
   };
+}
+
+function ensureStoreShape(value) {
+  const defaults = emptyStore();
+  for (const key of Object.keys(defaults)) {
+    value[key] = value[key] || {};
+  }
+  return value;
 }
 
 function splitEnv(value) {
@@ -1031,6 +1475,30 @@ function nowIso() {
 
 function normalizeMerchant(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function groupBy(items, keyFor) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = keyFor(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
+}
+
+function stableHash(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatCents(amountCents) {
+  const sign = amountCents < 0 ? "-" : "";
+  const absolute = Math.abs(amountCents);
+  return `${sign}$${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, "0")}`;
 }
 
 function dayDiff(first, second) {
@@ -1055,12 +1523,17 @@ function redact(value) {
 
 export {
   addDays,
+  billsBeforePayday,
+  buildSafeToSpendSnapshot,
   dayDiff,
   detectCandidates,
+  detectIncomeStreams,
+  detectPaycheckPilotData,
   emptyStore,
   encryptToken,
   betaStatus,
   betaAccessProblem,
+  currentPayPeriod,
   normalizeMerchant,
   seedMockData
 };

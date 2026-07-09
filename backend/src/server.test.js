@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addDays, dayDiff, detectCandidates, emptyStore, normalizeMerchant, seedMockData } from "./server.js";
+import {
+  addDays,
+  billsBeforePayday,
+  buildSafeToSpendSnapshot,
+  currentPayPeriod,
+  dayDiff,
+  detectCandidates,
+  detectIncomeStreams,
+  detectPaycheckPilotData,
+  emptyStore,
+  normalizeMerchant,
+  seedMockData
+} from "./server.js";
 
 test("normalizes merchants for recurring detection keys", () => {
   assert.equal(normalizeMerchant("  Amazon   Prime "), "amazon prime");
@@ -66,6 +78,42 @@ test("marks variable utility as bill and excludes paycheck deposits", () => {
   assert.equal(candidates[0].candidateType, "bill");
   assert.ok(candidates[0].confidenceScore >= 0.7);
   assert.ok(dayDiff(candidates[0].nextChargeWindowStart, candidates[0].nextChargeWindowEnd) >= 10);
+});
+
+test("detects paycheck income streams from shared transactions", () => {
+  const store = emptyStore();
+  store.users["user-1"] = { id: "user-1" };
+  store.connectedAccounts["acct-1"] = { id: "acct-1", userId: "user-1", plaidAccountId: "acct-1", name: "Checking" };
+  [
+    ["2026-01-03", -85000],
+    ["2026-01-17", -85000],
+    ["2026-01-31", -85000]
+  ].forEach(([date, amount], index) => {
+    store.bankTransactions[`paycheck-${index}`] = tx(`paycheck-${index}`, "Payroll Deposit", amount, date, "INCOME");
+  });
+
+  detectIncomeStreams("user-1", Object.values(store.bankTransactions), store);
+
+  const streams = Object.values(store.incomeStreams);
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].payerName, "Payroll Deposit");
+  assert.equal(streams[0].cadence, "Biweekly");
+  assert.equal(streams[0].averageAmountCents, 85000);
+});
+
+test("builds Paycheck Pilot bills before payday and safe-to-spend snapshot", () => {
+  const store = emptyStore();
+  seedMockData(store, "user-1");
+  detectPaycheckPilotData("user-1", store);
+  const period = currentPayPeriod("user-1", undefined, store);
+  const bills = billsBeforePayday("user-1", period, store);
+  const snapshot = buildSafeToSpendSnapshot("user-1", period, store);
+
+  assert.ok(Object.values(store.incomeStreams).length >= 1);
+  assert.ok(Object.values(store.paycheckCandidates).length >= 1);
+  assert.ok(bills.some((bill) => bill.merchantName === "Phone Bill" || bill.merchantName === "Electric Utility"));
+  assert.equal(snapshot.userId, "user-1");
+  assert.ok(Number.isFinite(snapshot.safeToSpendCents));
 });
 
 function tx(id, merchantName, amountCents, date, category = "GENERAL_SERVICES") {
