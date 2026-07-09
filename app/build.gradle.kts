@@ -25,8 +25,8 @@ android {
         applicationId = "com.renewalradar.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.7.0-staged-bank-sync"
+        versionCode = 15
+        versionName = "1.7.1-plaid-beta-trial"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

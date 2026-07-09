@@ -29,6 +29,9 @@ TOKEN_ENCRYPTION_KEY=
 BACKEND_PUBLIC_BASE_URL=https://your-hosted-backend.example
 PLAID_MOCK_MODE=true
 SEED_MOCK_DATA=true
+BETA_MODE=false
+BETA_MAX_USERS=10
+BETA_ALLOWED_USER_IDS=
 ```
 
 `TOKEN_ENCRYPTION_KEY` must be a 32-byte raw string or base64-encoded 32-byte
@@ -68,3 +71,18 @@ hosted backend URL is entered.
 
 The Android app never stores Plaid `client_secret`, `PLAID_SECRET`, or
 `access_token`. Access tokens remain encrypted only on the backend.
+
+## Low-Number Plaid Beta
+
+For a real-data beta, run the hosted backend with:
+
+```text
+PLAID_ENV=production
+PLAID_MOCK_MODE=false
+BETA_MODE=true
+BETA_MAX_USERS=5
+```
+
+Optionally set `BETA_ALLOWED_USER_IDS` to a comma-separated list of app install
+IDs when you want a closed tester allowlist. The backend rejects new Link token
+requests after the beta cap is full. Existing beta users can keep syncing.

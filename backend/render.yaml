@@ -21,6 +21,12 @@ services:
         value: true
       - key: SEED_MOCK_DATA
         value: true
+      - key: BETA_MODE
+        value: false
+      - key: BETA_MAX_USERS
+        value: 10
+      - key: BETA_ALLOWED_USER_IDS
+        sync: false
       - key: PLAID_CLIENT_ID
         sync: false
       - key: PLAID_SECRET

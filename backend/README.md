@@ -20,6 +20,9 @@ BACKEND_PUBLIC_BASE_URL=https://api.example.com
 PORT=8788
 PLAID_MOCK_MODE=true
 SEED_MOCK_DATA=true
+BETA_MODE=false
+BETA_MAX_USERS=10
+BETA_ALLOWED_USER_IDS=
 ```
 
 `TOKEN_ENCRYPTION_KEY` should be a 32-byte base64 key. Keep it in a secret
@@ -51,6 +54,8 @@ mode. Mock mode can sync demo recurring charges, but real Plaid Link requires
 valid Plaid sandbox/development/production credentials on the hosted backend.
 
 See `DEPLOYMENT.md` for Render and Railway setup.
+See `PLAID_BETA_REQUIREMENTS.md` for the low-number Plaid beta checklist,
+Trial/Limited Production notes, and backend cap settings.
 
 ## Security Rules
 

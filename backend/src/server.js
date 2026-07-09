@@ -21,6 +21,9 @@ const config = {
   plaidAndroidPackageName: process.env.PLAID_ANDROID_PACKAGE_NAME || "com.renewalradar.app",
   mockMode: (process.env.PLAID_MOCK_MODE || "true").toLowerCase() === "true",
   seedMockData: (process.env.SEED_MOCK_DATA || "true").toLowerCase() === "true",
+  betaMode: (process.env.BETA_MODE || "false").toLowerCase() === "true",
+  betaMaxUsers: Number(process.env.BETA_MAX_USERS || 10),
+  betaAllowedUserIds: splitEnv(process.env.BETA_ALLOWED_USER_IDS || ""),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120)
 };
@@ -56,7 +59,8 @@ const server = http.createServer(async (req, res) => {
         status: "ok",
         environment: config.plaidEnv,
         plaidConfigured: Boolean(config.plaidClientId && config.plaidSecret),
-        mockMode: config.mockMode
+        mockMode: config.mockMode,
+        betaTrial: betaStatus()
       });
     }
 
@@ -116,6 +120,8 @@ if (process.argv[1] === currentFile) {
 }
 
 async function handleCreateLinkToken(res, userId) {
+  const betaProblem = betaAccessProblem(userId);
+  if (betaProblem) return sendJson(res, 403, betaProblem);
   requireUser(store, userId);
 
   if (config.mockMode) {
@@ -152,6 +158,8 @@ async function handleExchangePublicToken(req, res, userId) {
     return sendJson(res, 400, { error: "public_token_required" });
   }
 
+  const betaProblem = betaAccessProblem(userId);
+  if (betaProblem) return sendJson(res, 403, betaProblem);
   requireUser(store, userId);
 
   if (config.mockMode) {
@@ -215,6 +223,8 @@ async function handleExchangePublicToken(req, res, userId) {
 }
 
 async function handleSyncTransactions(req, res, userId) {
+  const betaProblem = betaAccessProblem(userId);
+  if (betaProblem) return sendJson(res, 403, betaProblem);
   const body = await readJson(req).catch(() => ({}));
   const institutionId = body.institutionId || null;
   const result = await syncUserTransactions(userId, institutionId);
@@ -933,6 +943,42 @@ function getUserId(req) {
   return typeof value === "string" && value.trim() ? value.trim() : "local-user";
 }
 
+function betaStatus(currentStore = store) {
+  const activeUsers = countBetaUsers(currentStore);
+  return {
+    enabled: config.betaMode,
+    maxUsers: config.betaMaxUsers,
+    activeUsers,
+    slotsAvailable: config.betaMode ? Math.max(0, config.betaMaxUsers - activeUsers) : null,
+    allowlistEnabled: config.betaAllowedUserIds.length > 0
+  };
+}
+
+function betaAccessProblem(userId, currentStore = store) {
+  if (!config.betaMode) return null;
+  const allowlist = config.betaAllowedUserIds;
+  if (allowlist.length > 0 && !allowlist.includes(userId)) {
+    return {
+      error: "beta_not_allowed",
+      message: "This Renewal Radar install is not on the Plaid beta allowlist."
+    };
+  }
+  if (currentStore.users[userId]) return null;
+  if (countBetaUsers(currentStore) >= config.betaMaxUsers) {
+    return {
+      error: "beta_full",
+      message: "The Renewal Radar Plaid beta is full."
+    };
+  }
+  return null;
+}
+
+function countBetaUsers(currentStore = store) {
+  return Object.keys(currentStore.users)
+    .filter((id) => id !== "local-user")
+    .length;
+}
+
 async function readJson(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -1013,6 +1059,8 @@ export {
   detectCandidates,
   emptyStore,
   encryptToken,
+  betaStatus,
+  betaAccessProblem,
   normalizeMerchant,
   seedMockData
 };

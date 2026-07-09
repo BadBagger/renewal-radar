@@ -1,6 +1,7 @@
 package com.renewalradar.app
 
 import android.app.Application
+import com.renewalradar.app.data.AppInstallId
 import com.renewalradar.app.data.BackendApiConfig
 import com.renewalradar.app.data.BackendPlaidApi
 import com.renewalradar.app.data.BankConnectionRepository
@@ -39,7 +40,7 @@ class RenewalRadarApp : Application() {
         val backendApi: PlaidBackendApi = BackendPlaidApi(
             BackendApiConfig(
                 baseUrlProvider = { settingsStore.current().bankBackendUrl },
-                userId = "local-user",
+                userId = AppInstallId.get(this),
                 allowLocalHttp = false
             )
         )

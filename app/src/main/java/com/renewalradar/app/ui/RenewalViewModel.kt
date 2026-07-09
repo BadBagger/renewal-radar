@@ -393,6 +393,8 @@ private fun Throwable.toBankErrorMessage(fallback: String): String {
         "backend url is not configured" in text -> "Production backend is not configured. Demo Mode and CSV Import work without Plaid."
         "plaid credentials are required" in text || "secret" in text -> "Plaid sandbox secrets are missing on the backend."
         "link token" in text || "link_token" in text -> "Link token failed. Check the hosted backend Plaid sandbox configuration."
+        "beta_full" in text -> "The Plaid beta is full. Demo Mode and CSV Import still work."
+        "beta_not_allowed" in text -> "This install is not on the Plaid beta allowlist. Demo Mode and CSV Import still work."
         "bank backend must use https" in text -> "Bank sync backend must use HTTPS. Local HTTP is only for emulator development."
         "expired" in text || "invalid" in text -> "Link token expired. Tap Connect bank or card again."
         "offline" in text || "timeout" in text -> "Network offline or backend timed out."
